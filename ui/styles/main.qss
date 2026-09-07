@@ -1,0 +1,12 @@
+QWidget{
+    background-color: #0F0F10;
+    color: #ECECEC;
+    font-family: "Segoe UI", Inter, sand-sherif;
+}
+
+#TiteLabel{
+    font-size: 20px;
+    font-weight: 600;
+    color: #FFFFFF;
+    letter-spacing: 0.5px;
+}
