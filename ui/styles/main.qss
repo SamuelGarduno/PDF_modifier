@@ -1,12 +1,149 @@
-QWidget{
-    background-color: #0F0F10;
-    color: #ECECEC;
-    font-family: "Segoe UI", Inter, sand-sherif;
+/* Base */
+QWidget {
+    background-color: #0E0F12;
+    color: #F0F2F5;
+    font-family: "Segoe UI", Inter, sans-serif;
 }
 
-#TiteLabel{
-    font-size: 20px;
-    font-weight: 600;
+/* Sidebar */
+#Sidebar {
+    background-color: #16181D;
+    border-right: 1px solid #23272F;
+}
+
+#SidebarTitle {
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 1.5px;
+    color: #8B949E;
+    padding-left: 8px;
+}
+
+/* Botones del menú lateral */
+QPushButton#NavButton {
+    background-color: transparent;
+    color: #8B949E;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+QPushButton#NavButton:hover {
+    background-color: #1F232B;
     color: #FFFFFF;
-    letter-spacing: 0.5px;
+}
+
+QPushButton#NavButton:checked {
+    background-color: #23272F;
+    color: #FFFFFF;
+    font-weight: 600;
+    border-left: 3px solid #E50914;
+    border-radius: 0px 6px 6px 0px;
+}
+
+/* Área de contenido */
+#ContentArea {
+    background-color: #0E0F12;
+}
+
+#ViewTitle {
+    font-size: 16px;
+    font-weight: 600;
+    color: #C9D1D9;
+}
+
+/* Zona Drag & Drop */
+#DropZone {
+    background-color: #16181D;
+    border: 2px dashed #2E3440;
+    border-radius: 8px;
+    min-height: 140px;
+}
+
+#DropZone:hover {
+    border-color: #4C566A;
+    background-color: #1A1D23;
+}
+
+#DropZone[dragActive="true"] {
+    border-color: #E50914;
+    background-color: #21191D;
+}
+
+#DropZoneBadge {
+    background-color: #23272F;
+    color: #E50914;
+    font-weight: 800;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    max-width: 32px;
+}
+
+#DropZoneTitle {
+    font-size: 14px;
+    font-weight: 600;
+    color: #E6EDF3;
+}
+
+#DropZoneHint {
+    font-size: 12px;
+    color: #8B949E;
+}
+
+/* Lista de archivos */
+#FileList {
+    background-color: #16181D;
+    border: 1px solid #23272F;
+    border-radius: 6px;
+    padding: 6px;
+}
+
+#FileList::item {
+    background-color: #1E222A;
+    color: #ECECEC;
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-bottom: 4px;
+}
+
+#FileList::item:hover {
+    background-color: #282E39;
+}
+
+#FileList::item:selected {
+    background-color: #333A48;
+    color: #FFFFFF;
+}
+
+/* Botones de acción */
+#PrimaryButton {
+    background-color: #E50914;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 20px;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+#PrimaryButton:hover {
+    background-color: #F40612;
+}
+
+#SecondaryButton {
+    background-color: transparent;
+    color: #8B949E;
+    border: 1px solid #2E3440;
+    border-radius: 6px;
+    padding: 9px 16px;
+    font-size: 13px;
+}
+
+#SecondaryButton:hover {
+    background-color: #1F232B;
+    color: #FFFFFF;
 }
