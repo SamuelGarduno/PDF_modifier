@@ -147,3 +147,20 @@ QPushButton#NavButton:checked {
     background-color: #1F232B;
     color: #FFFFFF;
 }
+
+/* Barra de progreso */
+#MergeProgressBar {
+    border: 1px solid #23272F;
+    border-radius: 4px;
+    background-color: #16181D;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: #ECECEC;
+    height: 12px;
+}
+
+#MergeProgressBar::chunk {
+    background-color: #E50914;
+    border-radius: 3px;
+}
