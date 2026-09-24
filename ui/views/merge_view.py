@@ -61,6 +61,7 @@ class MergeView(QWidget):
         
         self.btn_merge = QPushButton("Unir archivos")
         self.btn_merge.setObjectName("PrimaryButton")
+        self.btn_merge.clicked.connect(self.star_merge_process)
         
         controls_layout.addWidget(self.btn_clear)
         controls_layout.addStretch()
@@ -120,7 +121,7 @@ class MergeView(QWidget):
         self.worker.error.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         
-        self.thread.star()
+        self.thread.start()
         
     def on_merge_success(self):
         self.btn_merge.setEnabled(True)
