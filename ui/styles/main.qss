@@ -164,3 +164,47 @@ QPushButton#NavButton:checked {
     background-color: #E50914;
     border-radius: 3px;
 }
+
+/* Tarjeta de información de documento */
+#InfoCard {
+    background-color: #16181D;
+    border: 1px solid #23272F;
+    border-radius: 6px;
+}
+
+#InfoCardPrimary {
+    font-size: 13px;
+    font-weight: 600;
+    color: #ECECEC;
+}
+
+#InfoCardSecondary {
+    font-size: 11px;
+    color: #8B949E;
+}
+
+/* Campos de entrada de formulario */
+#FieldLabel {
+    font-size: 12px;
+    font-weight: 500;
+    color: #8B949E;
+}
+
+#RangeInput {
+    background-color: #16181D;
+    border: 1px solid #2E3440;
+    border-radius: 6px;
+    color: #ECECEC;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+#RangeInput:focus {
+    border: 1px solid #E50914;
+}
+
+#RangeInput:disabled {
+    background-color: #121316;
+    color: #4C566A;
+    border-color: #1E222A;
+}
