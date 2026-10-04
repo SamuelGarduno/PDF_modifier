@@ -208,3 +208,10 @@ QPushButton#NavButton:checked {
     color: #4C566A;
     border-color: #1E222A;
 }
+
+#StatsSuccess {
+    font-size: 12px;
+    font-weight: 600;
+    color: #4CAF50;
+    margin-top: 4px;
+}

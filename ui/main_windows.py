@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QLabel, QHBoxLa
 from PySide6.QtCore import Qt
 from ui.views.merge_view import MergeView
 from ui.views.split_view import SplitView
+from ui.views.compress_view import CompressView
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -51,11 +52,17 @@ class MainWindow(QMainWindow):
         self.btn_split.setCheckable(True)
         self.btn_split.setObjectName("NavButton")
         
+        self.btn_compress = QPushButton("Comprimir PDF")
+        self.btn_compress.setCheckable(True)
+        self.btn_compress.setObjectName("NavButton")
+        
         self.nav_group.addButton(self.btn_merge, 0)
         self.nav_group.addButton(self.btn_split, 1)
+        self.nav_group.addButton(self.btn_compress, 2)
         
         layout.addWidget(self.btn_merge)
         layout.addWidget(self.btn_split)
+        layout.addWidget(self.btn_compress)
         layout.addStretch()
         self.main_layout.addWidget(sidebar)
         
@@ -66,10 +73,10 @@ class MainWindow(QMainWindow):
         
         self.view_merge = MergeView()
         self.view_split = SplitView()
-        
+        self.view_compress = CompressView()
         self.pages.addWidget(self.view_merge)
         self.pages.addWidget(self.view_split)
-        
+        self.pages.addWidget(self.view_compress)
         self.nav_group.idClicked.connect(self.pages.setCurrentIndex)
         
         self.main_layout.addWidget(self.pages)
