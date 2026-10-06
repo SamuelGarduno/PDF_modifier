@@ -55,7 +55,7 @@ class CompressView(QWidget):
         stats_layout.setSpacing(4)
         
         self.lbl_file_name = QLabel("Ningún archivo seleccionado")
-        self.lbl_file_name.setObjectName("InfoCardPromary")
+        self.lbl_file_name.setObjectName("InfoCardPrimary")
         self.lbl_original_size = QLabel("Tamaño actual: -")
         self.lbl_original_size.setObjectName("InfoCardSecondary")
         self.lbl_result_stat = QLabel("Reducción estimada: Pendiente de compresión")

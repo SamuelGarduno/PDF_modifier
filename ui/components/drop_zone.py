@@ -15,9 +15,9 @@ class DropZone(QFrame):
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(8)
         
-        self.label_icon = QLabel("PDF")
-        self.label_icon.setObjectName("DropZoneBadge")
-        self.label_icon.setAlignment(Qt.AlignCenter)
+        #self.label_icon = QLabel("PDF")
+        #self.label_icon.setObjectName("DropZoneBadge")
+        #self.label_icon.setAlignment(Qt.AlignCenter)
         
         self.label_text = QLabel("Arrastra tus documentos PDF aquí")
         self.label_text.setObjectName("DropZoneTitle")
@@ -25,7 +25,7 @@ class DropZone(QFrame):
         self.label_hint = QLabel("o haz click para explorar en el equipo")
         self.label_hint.setObjectName("DropZoneHint")
         
-        layout.addWidget(self.label_icon)
+        #layout.addWidget(self.label_icon)
         layout.addWidget(self.label_text)
         layout.addWidget(self.label_hint)
         
