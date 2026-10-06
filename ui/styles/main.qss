@@ -110,7 +110,7 @@ QPushButton#NavButton:checked {
 #FileList::item {
     background-color: #651f42;
     color: #fceeef;
-    border-radius: 4px;
+    border-radius: 10px;
     padding: 8px 12px;
     margin-bottom: 4px;
 }
@@ -131,7 +131,7 @@ QPushButton#NavButton:checked {
     border: none;
     border-radius: 10px;
     padding: 9px 20px;
-    font-weight: 600;
+    font-weight: 700;
     font-size: 15px;
 }
 
@@ -145,6 +145,7 @@ QPushButton#NavButton:checked {
     border: 0px solid #2E3440;
     border-radius: 10px;
     padding: 9px 16px;
+    font-weight: 600;
     font-size: 15px;
 }
 
@@ -178,14 +179,14 @@ QPushButton#NavButton:checked {
 }
 
 #InfoCardPrimary {
-    font-size: 13px;
+    font-size: 15px;
     background-color: #21171C;
     font-weight: 600;
     color: #fceeef;
 }
 
 #InfoCardSecondary {
-    font-size: 11px;
+    font-size: 13px;
     background-color: #21171C;
     color: #fceeef;
 }
