@@ -54,6 +54,7 @@ class SplitView(QWidget):
         
         self.info_card = QWidget()
         self.info_card.setObjectName("InfoCard")
+        self.info_card.setStyleSheet("background-color: #311423;")
         info_layout = QVBoxLayout(self.info_card)
         info_layout.setContentsMargins(16,12,16,12)
         
@@ -110,6 +111,7 @@ class SplitView(QWidget):
             
             self.lbl_file_name.setText(Path(self.current_pdf_path).name)
             self.lbl_page_count.setText(f"Páginas totales disponibles: {self.total_pages}")
+            self.info_card.setStyleSheet("background-color: #651f42;")
             
             self.input_range.setEnabled(True)
             self.input_range.setText(f"1-{self.total_pages}")

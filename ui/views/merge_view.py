@@ -62,6 +62,7 @@ class MergeView(QWidget):
         self.btn_merge = QPushButton("Unir archivos")
         self.btn_merge.setObjectName("PrimaryButton")
         self.btn_merge.clicked.connect(self.star_merge_process)
+        self.btn_merge.setEnabled(False)
         
         controls_layout.addWidget(self.btn_clear)
         controls_layout.addStretch()
@@ -76,6 +77,7 @@ class MergeView(QWidget):
                 item = QListWidgetItem(Path(path).name)
                 item.setToolTip(path)
                 self.file_list.addItem(item)
+        self.btn_merge.setEnabled(True if self.pdf_paths else False)
                 
     def clear_list(self):
         self.pdf_paths.clear()

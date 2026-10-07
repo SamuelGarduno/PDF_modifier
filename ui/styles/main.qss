@@ -80,21 +80,21 @@ QPushButton#NavButton:checked {
     background-color: transparent;
     color: #fceeef;
     font-weight: 800;
-    font-size: 11px;
+    font-size: 14px;
     padding: 3px 8px;
     border-radius: 4px;
     max-width: 32px;
 }
 
 #DropZoneTitle {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
     color: #fceeef;
     background-color: transparent;
 }
 
 #DropZoneHint {
-    font-size: 12px;
+    font-size: 14px;
     color: #fceeef;
     background-color: transparent;
 }
@@ -157,43 +157,43 @@ QPushButton#NavButton:checked {
 /* Barra de progreso */
 #MergeProgressBar {
     border: 0px solid #1a0f15;
-    border-radius: 4px;
+    border-radius: 6px;
     background-color: #1a0f15;
     text-align: center;
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 700;
     color: #1a0f15;
     height: 12px;
 }
 
 #MergeProgressBar::chunk {
     background-color: #e38292;
-    border-radius: 3px;
+    border-radius: 6px;
 }
 
 /* Tarjeta de información de documento */
 #InfoCard {
-    background-color: #21171C;
+    background-color: #311423;
     border: 0px solid #23272F;
     border-radius: 10px;
 }
 
 #InfoCardPrimary {
     font-size: 15px;
-    background-color: #21171C;
+    background-color: #311423;
     font-weight: 600;
     color: #fceeef;
 }
 
 #InfoCardSecondary {
     font-size: 13px;
-    background-color: #21171C;
+    background-color: #311423;
     color: #fceeef;
 }
 
 /* Campos de entrada de formulario */
 #FieldLabel {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     color: #fceeef;
 }
@@ -204,7 +204,7 @@ QPushButton#NavButton:checked {
     border-radius: 10px;
     color: #fceeef;
     padding: 8px 12px;
-    font-size: 13px;
+    font-size: 15px;
 }
 
 #RangeInput:focus {
@@ -218,8 +218,8 @@ QPushButton#NavButton:checked {
 }
 
 #StatsSuccess {
-    font-size: 12px;
-    background-color: #21171C;
+    font-size: 13px;
+    background-color: transparent;
     font-weight: 600;
     color: #e38292;
     margin-top: 4px;
