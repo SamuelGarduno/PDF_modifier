@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" version="1.2" baseProfile="tiny" viewBox="0 0 120 120" width="120" height="120">
+  <!-- Motivo para esquina INFERIOR IZQUIERDA; las otras 3 se obtienen reflejando en QML. Atributos nativos por elemento, sin CSS ni clases. -->
+  <path d="M 12 108 C 30 92, 46 66, 70 40 C 80 30, 90 24, 100 20" fill="none" stroke="#681D3A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 28 92 C 14 84, 12 66, 28 62 C 38 72, 36 86, 28 92 Z" fill="none" stroke="#681D3A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 46 70 C 60 78, 76 70, 76 54 C 62 52, 50 58, 46 70 Z" fill="none" stroke="#681D3A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 62 48 C 48 40, 48 24, 62 22 C 70 32, 68 42, 62 48 Z" fill="none" stroke="#681D3A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 82 32 C 94 38, 106 32, 106 20 C 94 18, 86 24, 82 32 Z" fill="none" stroke="#681D3A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="104" cy="18" r="5" fill="#DF8293" stroke="#681D3A" stroke-width="1.5"/>
+  <circle cx="104" cy="18" r="1.5" fill="#681D3A" stroke="none"/>
+</svg>
