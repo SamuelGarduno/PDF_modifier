@@ -28,8 +28,8 @@ BUTTON_PRIMARY_ROSE = "#DA7B88"
 QUEUE_CARD_BG = "#FFFDFB"
 
 # Dimensiones arquitectónicas obligatorias
-INITIAL_WINDOW_WIDTH = 960
-INITIAL_WINDOW_HEIGHT = 700
+INITIAL_WINDOW_WIDTH = 1280
+INITIAL_WINDOW_HEIGHT = 720
 SIDEBAR_FIXED_WIDTH = 260
 
 # Familias tipográficas con fallbacks seguros

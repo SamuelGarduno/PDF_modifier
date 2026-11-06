@@ -88,11 +88,32 @@ QtObject {
     readonly property int fontMetaSize: 12
     readonly property real metaOpacity: 0.68
 
-    // Duraciones de animación (120-200 ms)
-    readonly property int animFastMs: 140
-    readonly property int animFast: 140
-    readonly property int animNormalMs: 180
-    readonly property int animNormal: 180
+    // Duraciones y curva centralizadas (100-220 ms, Easing.OutCubic). Poner en 0 desactiva todas desde aquí.
+    readonly property int animFastMs: 100
+    readonly property int animFast: 100
+    readonly property int animQuick: 100
+    readonly property int animBase: 160
+    readonly property int animNormalMs: 160
+    readonly property int animNormal: 160
+    readonly property int animSlow: 220
+    readonly property int animExit: 120
+    readonly property int animDisplace: 140
+    readonly property int animStagger: 40
+    readonly property int animStaggerMaxItems: 5
+    // Por encima de este lote se omite el escalonado para no trabar equipos modestos
+    readonly property int animBulkThreshold: 10
+    readonly property int animEnterOffset: 8
+    readonly property int animEasing: Easing.OutCubic
+    readonly property real chipHoverScale: 1.05
+
+    // Chips secundarios ("También puedes:")
+    readonly property int chipHeight: 40
+    readonly property int chipIconCircle: 26
+    readonly property int chipIconSize: 16
+    readonly property int chipHorizontalPadding: 14
+    readonly property int chipFontSize: 15
+    // Tinte de acento al hover (alfa hex ~20%) mezclado sobre el fondo del chip
+    readonly property string chipHoverTintAlpha: "33"
 
     function toolAccentColor(toolId) {
         switch (toolId) {

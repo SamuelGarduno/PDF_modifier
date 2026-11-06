@@ -12,6 +12,136 @@ Item {
     property int draggedFileIndex: -1
     property int dropTargetIndex: -1
 
+    // Mantiene visible la cola mientras sus tarjetas se desvanecen al vaciarla
+    property bool queueExitInProgress: false
+    readonly property bool showQueuedState: studioBridge.fileCount > 0 || queueExitInProgress
+
+    ListModel {
+        id: queueModel
+        objectName: "queueModel"
+    }
+
+    Timer {
+        id: queueExitTimer
+        interval: Theme.animExit
+        repeat: false
+        onTriggered: dropzoneRoot.queueExitInProgress = false
+    }
+
+    // Sincroniza studioBridge.queuedFiles con queueModel mediante inserciones, borrados y
+    // movimientos puntuales (clave: ruta del archivo, única porque se rechazan duplicados).
+    QtObject {
+        id: queueSync
+        property bool ready: false
+        // Rutas que ya animaron su entrada y marca de tiempo del último lote añadido
+        property var seenPaths: ({})
+        property double batchStartMs: 0
+
+        function entryFrom(source, enterDelay, enterDuration, enterOffset) {
+            // "index" se omite: el delegado usa el contexto index de ListView
+            var entry = {}
+            for (var key in source) {
+                if (key !== "index")
+                    entry[key] = source[key]
+            }
+            entry.enterDelay = enterDelay
+            entry.enterDuration = enterDuration
+            entry.enterOffset = enterOffset
+            return entry
+        }
+
+        function updateExistingIfChanged(row, source) {
+            var current = queueModel.get(row)
+            var keys = ["name", "sizeFormatted", "sizeBytes", "pageCount", "isEncrypted", "isLocked", "isCorrupted", "isImage", "status", "thumbnailUrl"]
+            for (var k = 0; k < keys.length; k++) {
+                var prop = keys[k]
+                if (current[prop] !== source[prop])
+                    queueModel.setProperty(row, prop, source[prop])
+            }
+        }
+
+        function sync() {
+            var source = studioBridge.queuedFiles
+            var hadItems = queueModel.count > 0
+            var wanted = {}
+            for (var i = 0; i < source.length; i++)
+                wanted[source[i].path] = true
+
+            for (var r = queueModel.count - 1; r >= 0; r--) {
+                var removedPath = queueModel.get(r).path
+                if (!wanted[removedPath]) {
+                    delete seenPaths[removedPath]
+                    queueModel.remove(r)
+                }
+            }
+
+            var existing = {}
+            for (var e = 0; e < queueModel.count; e++)
+                existing[queueModel.get(e).path] = true
+
+            var addedCount = 0
+            for (var s = 0; s < source.length; s++) {
+                if (!existing[source[s].path])
+                    addedCount++
+            }
+            var isBulk = addedCount > Theme.animBulkThreshold
+            var duration = !ready ? 0 : (isBulk ? Theme.animExit : Theme.animBase)
+            var offset = (!ready || isBulk) ? 0 : Theme.animEnterOffset
+
+            var newIndex = 0
+            for (var t = 0; t < source.length; t++) {
+                var src = source[t]
+                if (t < queueModel.count && queueModel.get(t).path === src.path) {
+                    updateExistingIfChanged(t, src)
+                    continue
+                }
+                var foundAt = -1
+                for (var j = t + 1; j < queueModel.count; j++) {
+                    if (queueModel.get(j).path === src.path) {
+                        foundAt = j
+                        break
+                    }
+                }
+                if (foundAt >= 0) {
+                    queueModel.move(foundAt, t, 1)
+                    updateExistingIfChanged(t, src)
+                } else {
+                    var delay = (!ready || isBulk || newIndex >= Theme.animStaggerMaxItems)
+                                ? 0
+                                : (newIndex * Theme.animStagger)
+                    if (!ready)
+                        seenPaths[src.path] = true
+                    queueModel.insert(t, entryFrom(src, delay, duration, offset))
+                    newIndex++
+                }
+            }
+
+            if (addedCount > 0)
+                batchStartMs = Date.now()
+
+            if (source.length === 0 && hadItems && ready) {
+                dropzoneRoot.queueExitInProgress = true
+                queueExitTimer.restart()
+            } else if (source.length > 0) {
+                queueExitTimer.stop()
+                dropzoneRoot.queueExitInProgress = false
+            }
+        }
+    }
+
+    Connections {
+        target: studioBridge
+        function onFilesChanged() {
+            queueSync.sync()
+        }
+    }
+
+    // La carga inicial se sincroniza sin animación
+    Component.onCompleted: {
+        queueSync.sync()
+        queueSync.ready = true
+    }
+
     FileDialog {
         id: filePickerDialog
         title: "Seleccionar documentos PDF o imágenes"
@@ -43,7 +173,7 @@ Item {
     Canvas {
         id: dashedFrameCanvas
         objectName: "emptyDashedFrameCanvas"
-        visible: studioBridge.fileCount === 0
+        visible: !dropzoneRoot.showQueuedState
         anchors.fill: parent
         onPaint: {
             var ctx = getContext("2d")
@@ -82,7 +212,7 @@ Item {
         ]
         delegate: Item {
             objectName: modelData.name
-            visible: studioBridge.fileCount === 0
+            visible: !dropzoneRoot.showQueuedState
             width: 96
             height: 25
             x: dropzoneRoot.width * modelData.xRatio - width / 2
@@ -184,7 +314,7 @@ Item {
     Item {
         id: emptyStateContainer
         objectName: "emptyStateContainer"
-        visible: studioBridge.fileCount === 0
+        visible: !dropzoneRoot.showQueuedState
         anchors.fill: parent
         anchors.margins: Theme.outerMargin
 
@@ -288,7 +418,7 @@ Item {
     ColumnLayout {
         id: queuedStateContainer
         objectName: "queuedStateContainer"
-        visible: studioBridge.fileCount > 0
+        visible: dropzoneRoot.showQueuedState
         anchors.fill: parent
         anchors.leftMargin: Theme.outerMargin
         anchors.rightMargin: Theme.outerMargin
@@ -419,10 +549,36 @@ Item {
             spacing: Theme.cardSpacing
             cacheBuffer: 420
             boundsBehavior: Flickable.StopAtBounds
-            model: studioBridge.queuedFiles
+            // Modelo local sincronizado por diferencias: una QVariantList de Python reinicia el
+            // modelo entero en cada cambio y nunca dispararía las transiciones add/remove.
+            model: queueModel
+
+            // Salida: fundido 1 -> 0 en 120 ms (Theme.animExit) y reacomodo de las inferiores en 140 ms.
+            // Se usa NumberAnimation sobre opacity/y de las pocas tarjetas visibles porque ViewTransition
+            // reescribe "y" desde ListView y requiere sincronía por frame en el árbol de ítems.
+            remove: Transition {
+                NumberAnimation {
+                    property: "opacity"
+                    to: 0
+                    duration: Theme.animExit
+                    easing.type: Theme.animEasing
+                }
+            }
 
             displaced: Transition {
-                NumberAnimation { properties: "x,y"; duration: Theme.animNormal; easing.type: Easing.OutQuad }
+                NumberAnimation {
+                    properties: "x,y"
+                    duration: Theme.animDisplace
+                    easing.type: Theme.animEasing
+                }
+            }
+
+            // Reordenar (↑ ↓ o arrastre) conserva respuesta inmediata para no interferir con indexAt()
+            move: Transition {
+                PropertyAction { property: "opacity"; value: 1.0 }
+            }
+            moveDisplaced: Transition {
+                PropertyAction { property: "opacity"; value: 1.0 }
             }
 
             ScrollBar.vertical: ScrollBar {
@@ -432,28 +588,91 @@ Item {
 
             delegate: FocusScope {
                 id: fileCardFocusScope
-                objectName: "queuedFileCard_" + modelData.index
+                readonly property var fileEntry: model
+                readonly property string fileKey: model.path
+                readonly property int rowIndex: index
+                readonly property bool isRemoving: rowIndex < 0
+                objectName: "queuedFileCard_" + rowIndex
                 width: queueListView.width
                 height: 88
                 activeFocusOnTab: true
 
-                Keys.onDeletePressed: studioBridge.removeFileAt(modelData.index)
+                transform: Translate {
+                    id: enterSlide
+                    y: 0
+                }
+
+                // Entrada individual por tarjeta: permite escalonar 40 ms (máx. 5 tarjetas) sin que
+                // ListView agrupe todas las inserciones del lote en una sola PauseAnimation compartida.
+                SequentialAnimation {
+                    id: cardEnterAnim
+                    PauseAnimation {
+                        id: cardEnterPause
+                        duration: 0
+                    }
+                    ParallelAnimation {
+                        NumberAnimation {
+                            target: fileCardFocusScope
+                            property: "opacity"
+                            from: 0
+                            to: 1
+                            duration: fileEntry.enterDuration
+                            easing.type: Theme.animEasing
+                        }
+                        NumberAnimation {
+                            target: enterSlide
+                            property: "y"
+                            from: fileEntry.enterOffset
+                            to: 0
+                            duration: fileEntry.enterDuration
+                            easing.type: Theme.animEasing
+                        }
+                    }
+                    onStopped: {
+                        if (!fileCardFocusScope.isRemoving) {
+                            fileCardFocusScope.opacity = 1.0
+                            enterSlide.y = 0
+                        }
+                    }
+                }
+
+                onIsRemovingChanged: {
+                    if (isRemoving) {
+                        cardEnterAnim.stop()
+                        enterSlide.y = 0
+                    }
+                }
+
+                Component.onCompleted: {
+                    var withinBatchWindow = (Date.now() - queueSync.batchStartMs) < 120
+                    if (queueSync.ready && withinBatchWindow && !queueSync.seenPaths[fileKey] && fileEntry.enterDuration > 0) {
+                        queueSync.seenPaths[fileKey] = true
+                        opacity = 0
+                        enterSlide.y = fileEntry.enterOffset
+                        cardEnterPause.duration = fileEntry.enterDelay
+                        cardEnterAnim.start()
+                    } else {
+                        queueSync.seenPaths[fileKey] = true
+                    }
+                }
+
+                Keys.onDeletePressed: studioBridge.removeFileAt(fileCardFocusScope.rowIndex)
                 Keys.onPressed: function(event) {
                     if ((event.modifiers & Qt.AltModifier) && event.key === Qt.Key_Up) {
-                        studioBridge.moveFileUp(modelData.index)
+                        studioBridge.moveFileUp(fileCardFocusScope.rowIndex)
                         event.accepted = true
                     } else if ((event.modifiers & Qt.AltModifier) && event.key === Qt.Key_Down) {
-                        studioBridge.moveFileDown(modelData.index)
+                        studioBridge.moveFileDown(fileCardFocusScope.rowIndex)
                         event.accepted = true
                     }
                 }
 
                 // Indicador visual de destino al arrastrar para reordenar
                 Rectangle {
-                    objectName: "dropTargetIndicator_" + modelData.index
+                    objectName: "dropTargetIndicator_" + fileCardFocusScope.rowIndex
                     visible: dropzoneRoot.draggedFileIndex >= 0
-                             && dropzoneRoot.dropTargetIndex === modelData.index
-                             && dropzoneRoot.draggedFileIndex !== modelData.index
+                             && dropzoneRoot.dropTargetIndex === fileCardFocusScope.rowIndex
+                             && dropzoneRoot.draggedFileIndex !== fileCardFocusScope.rowIndex
                     anchors.top: parent.top
                     anchors.topMargin: -6
                     anchors.left: parent.left
@@ -468,9 +687,9 @@ Item {
                     id: fileCardBg
                     anchors.fill: parent
                     radius: Theme.queueCardRadius
-                    color: modelData.isCorrupted
+                    color: fileEntry.isCorrupted
                            ? Theme.errorBg
-                           : (dropzoneRoot.draggedFileIndex === modelData.index
+                           : (dropzoneRoot.draggedFileIndex === fileCardFocusScope.rowIndex
                               ? "#FAF0EE"
                               : (cardSurfaceHover.hovered ? "#FFF9F8" : Theme.surfaceCard))
                     border.width: fileCardFocusScope.activeFocus
@@ -478,9 +697,9 @@ Item {
                                   : Theme.borderSubtleWidth
                     border.color: fileCardFocusScope.activeFocus
                                   ? Theme.focusRingColor
-                                  : (modelData.isCorrupted
+                                  : (fileEntry.isCorrupted
                                      ? Theme.errorBorder
-                                     : (modelData.isLocked ? Theme.toolProtectAccent : Theme.borderSubtleColor))
+                                     : (fileEntry.isLocked ? Theme.toolProtectAccent : Theme.borderSubtleColor))
 
                     Behavior on color {
                         ColorAnimation { duration: Theme.animFast }
@@ -530,8 +749,8 @@ Item {
                                 cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
                                 onPressed: {
                                     fileCardFocusScope.forceActiveFocus()
-                                    dropzoneRoot.draggedFileIndex = modelData.index
-                                    dropzoneRoot.dropTargetIndex = modelData.index
+                                    dropzoneRoot.draggedFileIndex = fileCardFocusScope.rowIndex
+                                    dropzoneRoot.dropTargetIndex = fileCardFocusScope.rowIndex
                                 }
                                 onPositionChanged: function(mouse) {
                                     if (!pressed || dropzoneRoot.draggedFileIndex < 0)
@@ -561,16 +780,16 @@ Item {
                         // 2. Número en círculo (SOLO si hay 2 o más archivos en la cola)
                         Rectangle {
                             id: orderNumberBadge
-                            objectName: "orderNumberBadge_" + modelData.index
+                            objectName: "orderNumberBadge_" + fileCardFocusScope.rowIndex
                             visible: studioBridge.fileCount >= 2
                             Layout.preferredWidth: 26
                             Layout.preferredHeight: 26
                             radius: 13
-                            color: modelData.isCorrupted ? Theme.errorBorder : Theme.wineDeep
+                            color: fileEntry.isCorrupted ? Theme.errorBorder : Theme.wineDeep
 
                             Text {
                                 anchors.centerIn: parent
-                                text: (modelData.index + 1).toString()
+                                text: (fileCardFocusScope.rowIndex + 1).toString()
                                 font.family: Theme.sansFont
                                 font.pixelSize: 12
                                 font.bold: true
@@ -581,38 +800,38 @@ Item {
                         // 3. Miniatura de la primera página (56x72 px, asíncrona con placeholder)
                         Rectangle {
                             id: thumbnailContainer
-                            objectName: "thumbnailContainer_" + modelData.index
+                            objectName: "thumbnailContainer_" + fileCardFocusScope.rowIndex
                             Layout.preferredWidth: Theme.thumbnailWidth
                             Layout.preferredHeight: Theme.thumbnailHeight
                             radius: 6
-                            color: modelData.isCorrupted ? "#F6D9D5" : "#F6ECEB"
+                            color: fileEntry.isCorrupted ? "#F6D9D5" : "#F6ECEB"
                             border.width: 1
-                            border.color: modelData.isCorrupted ? Theme.errorBorder : Theme.borderSubtleColor
+                            border.color: fileEntry.isCorrupted ? Theme.errorBorder : Theme.borderSubtleColor
                             clip: true
 
                             // Placeholder mientras carga o si está dañado
                             Column {
-                                visible: thumbImage.status !== Image.Ready || modelData.isCorrupted
+                                visible: thumbImage.status !== Image.Ready || fileEntry.isCorrupted
                                 anchors.centerIn: parent
                                 spacing: 3
 
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
-                                    text: modelData.isCorrupted ? "!" : "···"
+                                    text: fileEntry.isCorrupted ? "!" : "···"
                                     font.family: Theme.serifFont
-                                    font.pixelSize: modelData.isCorrupted ? 18 : 14
+                                    font.pixelSize: fileEntry.isCorrupted ? 18 : 14
                                     font.bold: true
-                                    color: modelData.isCorrupted ? Theme.errorText : Theme.textSecondary
+                                    color: fileEntry.isCorrupted ? Theme.errorText : Theme.textSecondary
                                 }
                             }
 
                             Image {
                                 id: thumbImage
-                                objectName: "fileThumbImage_" + modelData.index
-                                visible: !modelData.isCorrupted && modelData.thumbnailUrl.length > 0
+                                objectName: "fileThumbImage_" + fileCardFocusScope.rowIndex
+                                visible: !fileEntry.isCorrupted && fileEntry.thumbnailUrl.length > 0
                                 anchors.fill: parent
                                 anchors.margins: 2
-                                source: modelData.thumbnailUrl
+                                source: fileEntry.thumbnailUrl
                                 sourceSize.width: Theme.thumbnailWidth * 2
                                 sourceSize.height: Theme.thumbnailHeight * 2
                                 fillMode: Image.PreserveAspectFit
@@ -634,15 +853,15 @@ Item {
 
                                 Text {
                                     id: fileNameLabel
-                                    objectName: "queuedFileName_" + modelData.index
+                                    objectName: "queuedFileName_" + fileCardFocusScope.rowIndex
                                     anchors.fill: parent
                                     verticalAlignment: Text.AlignVCenter
-                                    text: modelData.name
+                                    text: fileEntry.name
                                     font.family: Theme.sansFont
                                     font.pixelSize: Theme.fontBodySize
                                     font.bold: true
                                     elide: Text.ElideMiddle
-                                    color: modelData.isCorrupted ? Theme.errorText : Theme.textPrimary
+                                    color: fileEntry.isCorrupted ? Theme.errorText : Theme.textPrimary
                                 }
 
                                 HoverHandler {
@@ -651,40 +870,40 @@ Item {
 
                                 ToolTip.visible: fileNameHover.hovered
                                 ToolTip.delay: 200
-                                ToolTip.text: modelData.name
+                                ToolTip.text: fileEntry.name
                             }
 
                             RowLayout {
                                 spacing: 8
 
                                 Text {
-                                    objectName: "queuedFileMeta_" + modelData.index
-                                    text: modelData.isCorrupted
+                                    objectName: "queuedFileMeta_" + fileCardFocusScope.rowIndex
+                                    text: fileEntry.isCorrupted
                                           ? "No se pudo leer · Se excluirá del proceso"
-                                          : (modelData.isLocked
-                                             ? ("Protegido con clave · " + modelData.sizeFormatted)
-                                             : ((modelData.isImage
+                                          : (fileEntry.isLocked
+                                             ? ("Protegido con clave · " + fileEntry.sizeFormatted)
+                                             : ((fileEntry.isImage
                                                  ? "1 postal"
-                                                 : (modelData.pageCount + (modelData.pageCount === 1 ? " página" : " páginas")))
-                                                + " · " + modelData.sizeFormatted))
+                                                 : (fileEntry.pageCount + (fileEntry.pageCount === 1 ? " página" : " páginas")))
+                                                + " · " + fileEntry.sizeFormatted))
                                     font.family: Theme.scriptFont
                                     font.italic: true
                                     font.pixelSize: Theme.fontMetaSize
-                                    color: modelData.isCorrupted
+                                    color: fileEntry.isCorrupted
                                            ? Theme.errorText
-                                           : (modelData.isLocked ? "#43345E" : Theme.textPrimary)
-                                    opacity: (modelData.isCorrupted || modelData.isLocked) ? 1.0 : Theme.metaOpacity
+                                           : (fileEntry.isLocked ? "#43345E" : Theme.textPrimary)
+                                    opacity: (fileEntry.isCorrupted || fileEntry.isLocked) ? 1.0 : Theme.metaOpacity
                                 }
 
                                 PillButton {
-                                    objectName: "unlockInlineBtn_" + modelData.index
-                                    visible: modelData.isLocked
+                                    objectName: "unlockInlineBtn_" + fileCardFocusScope.rowIndex
+                                    visible: fileEntry.isLocked
                                     height: 26
                                     horizontalPadding: 12
                                     text: "Abrir sello"
                                     primaryStyle: false
                                     solidShadow: false
-                                    onClicked: studioBridge.requestUnlockAt(modelData.index)
+                                    onClicked: studioBridge.requestUnlockAt(fileCardFocusScope.rowIndex)
                                 }
                             }
                         }
@@ -697,8 +916,8 @@ Item {
                             // Botón Subir (↑)
                             Rectangle {
                                 id: moveUpBtn
-                                objectName: "moveUpBtn_" + modelData.index
-                                property bool canMoveUp: modelData.index > 0
+                                objectName: "moveUpBtn_" + fileCardFocusScope.rowIndex
+                                property bool canMoveUp: fileCardFocusScope.rowIndex > 0
                                 width: 32
                                 height: 32
                                 radius: 16
@@ -725,7 +944,7 @@ Item {
                                 TapHandler {
                                     id: upTap
                                     enabled: moveUpBtn.canMoveUp
-                                    onTapped: studioBridge.moveFileUp(modelData.index)
+                                    onTapped: studioBridge.moveFileUp(fileCardFocusScope.rowIndex)
                                 }
                                 ToolTip.visible: upHover.hovered && moveUpBtn.canMoveUp
                                 ToolTip.delay: 300
@@ -735,8 +954,8 @@ Item {
                             // Botón Bajar (↓)
                             Rectangle {
                                 id: moveDownBtn
-                                objectName: "moveDownBtn_" + modelData.index
-                                property bool canMoveDown: modelData.index < (studioBridge.fileCount - 1)
+                                objectName: "moveDownBtn_" + fileCardFocusScope.rowIndex
+                                property bool canMoveDown: fileCardFocusScope.rowIndex < (studioBridge.fileCount - 1)
                                 width: 32
                                 height: 32
                                 radius: 16
@@ -763,7 +982,7 @@ Item {
                                 TapHandler {
                                     id: downTap
                                     enabled: moveDownBtn.canMoveDown
-                                    onTapped: studioBridge.moveFileDown(modelData.index)
+                                    onTapped: studioBridge.moveFileDown(fileCardFocusScope.rowIndex)
                                 }
                                 ToolTip.visible: downHover.hovered && moveDownBtn.canMoveDown
                                 ToolTip.delay: 300
@@ -773,7 +992,7 @@ Item {
                             // Botón Eliminar (✕)
                             Rectangle {
                                 id: deleteFileBtn
-                                objectName: "deleteFileBtn_" + modelData.index
+                                objectName: "deleteFileBtn_" + fileCardFocusScope.rowIndex
                                 width: 32
                                 height: 32
                                 radius: 16
@@ -798,7 +1017,7 @@ Item {
                                 }
                                 TapHandler {
                                     id: delTap
-                                    onTapped: studioBridge.removeFileAt(modelData.index)
+                                    onTapped: studioBridge.removeFileAt(fileCardFocusScope.rowIndex)
                                 }
                                 ToolTip.visible: delHover.hovered
                                 ToolTip.delay: 300
@@ -1059,9 +1278,25 @@ Item {
                                 objectName: "suggestedToolCard_" + modelData.id
                                 property string toolId: modelData.id
                                 property bool isPrimary: false
-                                width: chipInnerRow.implicitWidth + 24
-                                height: 36
+                                // Hover y foco de teclado comparten el mismo estado visual
+                                readonly property bool highlighted: enabled && visible
+                                                                    && (chipHover.hovered || activeFocus)
+                                readonly property color hoverTintColor: Qt.tint(
+                                    Theme.surfaceCard,
+                                    "#" + Theme.chipHoverTintAlpha + String(Theme.toolAccentColor(modelData.id)).substring(1))
+                                width: chipInnerRow.implicitWidth + Theme.chipHorizontalPadding * 2
+                                height: Theme.chipHeight
                                 activeFocusOnTab: true
+                                // La escala no altera el layout; el chip resaltado se dibuja sobre sus vecinos
+                                z: highlighted ? 1 : 0
+                                scale: highlighted ? Theme.chipHoverScale : 1.0
+
+                                Behavior on scale {
+                                    ScaleAnimator {
+                                        duration: secondaryChip.highlighted ? Theme.animFast : Theme.animExit
+                                        easing.type: Theme.animEasing
+                                    }
+                                }
 
                                 Keys.onReturnPressed: {
                                     secondaryChip.forceActiveFocus()
@@ -1077,18 +1312,24 @@ Item {
                                 }
 
                                 Rectangle {
+                                    id: chipBgRect
+                                    objectName: "chipBgRect_" + modelData.id
+                                    readonly property real currentBorderWidth: border.width
                                     anchors.fill: parent
-                                    radius: Theme.chipRadius
+                                    radius: height / 2
                                     color: chipTap.pressed
                                            ? "#EED3D0"
-                                           : (chipHover.hovered ? "#FAF0EE" : Theme.surfaceCard)
+                                           : (secondaryChip.highlighted ? secondaryChip.hoverTintColor : Theme.surfaceCard)
                                     border.width: secondaryChip.activeFocus ? 2.0 : Theme.borderSubtleWidth
                                     border.color: secondaryChip.activeFocus
                                                   ? Theme.focusRingColor
                                                   : Theme.borderSubtleColor
 
                                     Behavior on color {
-                                        ColorAnimation { duration: Theme.animFast }
+                                        ColorAnimation {
+                                            duration: secondaryChip.highlighted ? Theme.animFast : Theme.animExit
+                                            easing.type: Theme.animEasing
+                                        }
                                     }
 
                                     Row {
@@ -1097,20 +1338,20 @@ Item {
                                         spacing: 7
 
                                         Rectangle {
-                                            width: 22
-                                            height: 22
-                                            radius: 11
+                                            width: Theme.chipIconCircle
+                                            height: Theme.chipIconCircle
+                                            radius: Theme.chipIconCircle / 2
                                             anchors.verticalCenter: parent.verticalCenter
                                             color: Theme.toolSoftBgColor(modelData.id)
 
                                             Image {
                                                 id: chipSvgIcon
                                                 anchors.centerIn: parent
-                                                width: 14
-                                                height: 14
+                                                width: Theme.chipIconSize
+                                                height: Theme.chipIconSize
                                                 source: Theme.toolIconSource(modelData.id)
-                                                sourceSize.width: 28
-                                                sourceSize.height: 28
+                                                sourceSize.width: Theme.chipIconSize * 2
+                                                sourceSize.height: Theme.chipIconSize * 2
                                                 fillMode: Image.PreserveAspectFit
                                                 smooth: true
                                                 visible: false
@@ -1128,7 +1369,7 @@ Item {
                                             anchors.verticalCenter: parent.verticalCenter
                                             text: modelData.title
                                             font.family: Theme.sansFont
-                                            font.pixelSize: Theme.fontBodySize
+                                            font.pixelSize: Theme.chipFontSize
                                             color: Theme.textPrimary
                                         }
                                     }
@@ -1136,6 +1377,7 @@ Item {
 
                                 HoverHandler {
                                     id: chipHover
+                                    enabled: secondaryChip.enabled
                                     cursorShape: Qt.PointingHandCursor
                                 }
 

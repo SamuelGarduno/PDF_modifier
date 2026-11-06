@@ -20,6 +20,9 @@ from ui.theme import (
     generate_stationery_qss,
 )
 
+# Margen holgado sobre las animaciones de la cola (salida 120 ms, entrada ≤ 160 ms + escalonado)
+QUEUE_EXIT_SETTLE_MS = 300
+
 
 def test_design_tokens_and_qss_constants() -> None:
     """Verifica que los 5 tokens de color exactos y las constantes arquitectónicas estén presentes."""
@@ -506,7 +509,8 @@ def test_merge_pdf_empty_and_queued_states_atelier_coquette(
 
     # 4. Probar "Vaciar cola" y retorno limpio al Estado 1 (Mesa de Trabajo Vacía)
     bridge.clearFiles()
-    qtbot.wait(50)
+    # Espera a que termine el fundido de salida de las tarjetas (Theme.animExit = 120 ms)
+    qtbot.wait(QUEUE_EXIT_SETTLE_MS)
     assert bridge.fileCount == 0
     assert bridge.totalQueuedPages == 0
     assert bridge.isToolSelected is False
