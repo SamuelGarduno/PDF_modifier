@@ -1,56 +1,84 @@
 import QtQuick
 import QtQuick.Controls
+import "."
 
-Item {
+FocusScope {
     id: pillRoot
     property string text: "Acción"
     property bool primaryStyle: true
     property bool enabledButton: true
     property bool solidShadow: primaryStyle
-    property int horizontalPadding: 20
+    property int horizontalPadding: 18
     property bool hoveredState: hoverHandler.hovered
-    // Texto informativo opcional (p. ej. condición faltante cuando el botón está inactivo)
+    property bool pressedState: tapHandler.pressed
     property string disabledHint: ""
     signal clicked()
+
+    activeFocusOnTab: enabledButton
 
     ToolTip.visible: hoverHandler.hovered && !enabledButton && disabledHint.length > 0
     ToolTip.text: disabledHint
     ToolTip.delay: 250
 
-    implicitWidth: Math.max(116, Math.ceil(labelItem.implicitWidth) + horizontalPadding * 2)
+    implicitWidth: Math.max(104, Math.ceil(labelItem.implicitWidth) + horizontalPadding * 2)
     implicitHeight: 38
 
-    // Sombra inferior sólida desplazada (2.5px) en vino oscuro #521928 para efecto relieve de papelería/sello
+    Keys.onReturnPressed: {
+        if (pillRoot.enabledButton)
+            pillRoot.clicked()
+    }
+    Keys.onEnterPressed: {
+        if (pillRoot.enabledButton)
+            pillRoot.clicked()
+    }
+    Keys.onSpacePressed: {
+        if (pillRoot.enabledButton)
+            pillRoot.clicked()
+    }
+
+    // Sombra inferior sólida desplazada SOLO para el botón principal relleno
     Rectangle {
         id: stampReliefShadow
-        visible: pillRoot.solidShadow && pillRoot.enabledButton
+        visible: pillRoot.solidShadow && pillRoot.primaryStyle && pillRoot.enabledButton
         width: pillRoot.width
         height: pillRoot.height - 2
         radius: height / 2
         x: 0
-        y: 3
-        color: themePalette.wineDeep
+        y: pillRoot.pressedState ? 1 : 3
+        color: Theme.wineDeep
     }
 
     Rectangle {
         id: pillBg
         width: pillRoot.width
-        height: pillRoot.solidShadow && pillRoot.enabledButton ? pillRoot.height - 2 : pillRoot.height
+        height: (pillRoot.solidShadow && pillRoot.primaryStyle && pillRoot.enabledButton) ? pillRoot.height - 2 : pillRoot.height
         radius: height / 2
-        y: pillRoot.hoveredState && pillRoot.enabledButton ? -1 : 0
+        y: !pillRoot.enabledButton
+           ? 0
+           : (pillRoot.pressedState ? 1 : (pillRoot.hoveredState ? -1 : 0))
         color: !pillRoot.enabledButton
-               ? "#E5D2D5"
-               : (pillRoot.hoveredState
-                  ? themePalette.secondary
-                  : (pillRoot.primaryStyle ? themePalette.buttonPrimaryRose : themePalette.accent))
-        border.width: 1.3
-        border.color: !pillRoot.enabledButton ? "#B8989F" : themePalette.wineDeep
+               ? "#EAE0E2"
+               : (pillRoot.primaryStyle
+                  ? (pillRoot.pressedState
+                     ? Theme.wineDeep
+                     : (pillRoot.hoveredState ? Theme.secondaryWine : Theme.primaryRose))
+                  : (pillRoot.pressedState
+                     ? "#EED3D0"
+                     : (pillRoot.hoveredState ? "#F5E3E1" : "#FFFDFB")))
+        border.width: pillRoot.activeFocus
+                      ? 2.0
+                      : (pillRoot.primaryStyle ? Theme.borderStrongWidth : Theme.borderSubtleWidth)
+        border.color: !pillRoot.enabledButton
+                      ? "#C4AEB4"
+                      : (pillRoot.activeFocus
+                         ? Theme.focusRingColor
+                         : (pillRoot.primaryStyle ? Theme.wineDeep : Theme.borderSubtleColor))
 
         Behavior on y {
-            NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
+            NumberAnimation { duration: Theme.animFast; easing.type: Easing.OutQuad }
         }
         Behavior on color {
-            ColorAnimation { duration: 180 }
+            ColorAnimation { duration: Theme.animNormal }
         }
 
         Text {
@@ -63,17 +91,17 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
             text: pillRoot.text
-            font.family: themePalette.sansFont
-            font.pixelSize: 13
-            font.bold: true
+            font.family: Theme.sansFont
+            font.pixelSize: Theme.fontBodySize
+            font.bold: pillRoot.primaryStyle
             color: !pillRoot.enabledButton
-                   ? "#8E6D76"
-                   : (pillRoot.hoveredState
-                      ? themePalette.surfaceLight
-                      : "#2D1018")
+                   ? "#8A6D75"
+                   : (pillRoot.primaryStyle && (pillRoot.hoveredState || pillRoot.pressedState)
+                      ? Theme.surfaceCard
+                      : Theme.textPrimary)
 
             Behavior on color {
-                ColorAnimation { duration: 160 }
+                ColorAnimation { duration: Theme.animFast }
             }
         }
     }
@@ -84,7 +112,11 @@ Item {
     }
 
     TapHandler {
+        id: tapHandler
         enabled: pillRoot.enabledButton
-        onTapped: pillRoot.clicked()
+        onTapped: {
+            pillRoot.forceActiveFocus()
+            pillRoot.clicked()
+        }
     }
 }

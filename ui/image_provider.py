@@ -9,6 +9,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtQuick import QQuickImageProvider
 
+from core.exceptions import PDFCorruptedError, PDFEncryptedError
 from core.pdf_engine import DEFAULT_THUMBNAIL_DPI, PDFEngine
 from core.workers import ThumbnailLRUCache
 from ui.theme import ACCENT, SECONDARY, SURFACE_LIGHT
@@ -29,6 +30,10 @@ class PDFPageImageProvider(QQuickImageProvider):
     def register_password(self, file_path: Path, password: str) -> None:
         """Asocia la contraseña desbloqueada de un PDF para permitir su renderizado."""
         self._passwords[str(Path(file_path).resolve())] = password
+
+    def invalidate_file(self, file_path: Path) -> None:
+        """Limpia entradas de caché asociadas a un archivo eliminado o actualizado."""
+        self.cache.remove_for_file(str(Path(file_path).resolve()))
 
     def requestImage(
         self, id_str: str, size: QSize, requestedSize: QSize
@@ -51,7 +56,7 @@ class PDFPageImageProvider(QQuickImageProvider):
 
             file_path = Path(raw_path)
             if not file_path.exists():
-                return self._create_placeholder_image("Archivo no encontrado")
+                return self._create_placeholder_image("No encontrado", is_error=True)
 
             resolved_str = str(file_path.resolve())
             cache_key = (resolved_str, page_index, dpi)
@@ -59,17 +64,22 @@ class PDFPageImageProvider(QQuickImageProvider):
 
             if png_bytes is None:
                 pwd = self._passwords.get(resolved_str)
-                png_bytes = PDFEngine.render_page_png_bytes(
-                    file_path=file_path,
-                    page_index=page_index,
-                    dpi=dpi,
-                    password=pwd,
-                )
-                self.cache.put(cache_key, png_bytes)
+                try:
+                    png_bytes = PDFEngine.render_page_png_bytes(
+                        file_path=file_path,
+                        page_index=page_index,
+                        dpi=dpi,
+                        password=pwd,
+                    )
+                    self.cache.put(cache_key, png_bytes)
+                except PDFEncryptedError:
+                    return self._create_locked_image()
+                except PDFCorruptedError:
+                    return self._create_placeholder_image("Ilegible", is_error=True)
 
             image = QImage.fromData(png_bytes, "PNG")
             if image.isNull():
-                return self._create_placeholder_image("Error de imagen")
+                return self._create_placeholder_image("Error", is_error=True)
 
             if requestedSize.isValid() and requestedSize.width() > 0 and requestedSize.height() > 0:
                 image = image.scaled(
@@ -79,22 +89,58 @@ class PDFPageImageProvider(QQuickImageProvider):
                 )
             return image
         except Exception:
-            return self._create_placeholder_image(f"Pág. {id_str.split('?')[0]}")
+            return self._create_placeholder_image("Error", is_error=True)
 
     @staticmethod
-    def _create_placeholder_image(label: str) -> QImage:
-        """Genera una hoja estilo papelería cuando el PDF aún no está disponible o está bloqueado."""
-        img = QImage(220, 300, QImage.Format.Format_ARGB32)
-        img.fill(QColor(SURFACE_LIGHT))
+    def _create_locked_image() -> QImage:
+        """Genera una miniatura elegante con candado y sello para PDFs protegidos con clave."""
+        img = QImage(168, 216, QImage.Format.Format_ARGB32)
+        img.fill(QColor("#F7EEF8"))
         painter = QPainter(img)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(SECONDARY))
+        pen = QPen(QColor("#681D3A"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawRoundedRect(6, 6, 156, 204, 8, 8)
+
+        # Círculo de lacre central
+        painter.setBrush(QColor("#A99BC4"))
+        painter.drawEllipse(48, 56, 72, 72)
+
+        # Candado dibujado dentro del sello
+        lock_pen = QPen(QColor("#31234A"))
+        lock_pen.setWidth(3)
+        painter.setPen(lock_pen)
+        painter.setBrush(QColor("#FFFDFB"))
+        painter.drawRoundedRect(68, 88, 32, 24, 4, 4)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(73, 72, 22, 26, 0, 180 * 16)
+
+        painter.setPen(QColor("#521928"))
+        painter.drawText(
+            img.rect().adjusted(8, 136, -8, -12),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            "Protegido",
+        )
+        painter.end()
+        return img
+
+    @staticmethod
+    def _create_placeholder_image(label: str, is_error: bool = False) -> QImage:
+        """Genera una hoja estilo papelería cuando el PDF aún no está disponible o está dañado."""
+        img = QImage(220, 300, QImage.Format.Format_ARGB32)
+        bg = "#FDF0F2" if is_error else SURFACE_LIGHT
+        border = "#9E1B32" if is_error else SECONDARY
+        img.fill(QColor(bg))
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(border))
         pen.setWidth(2)
         painter.setPen(pen)
         painter.drawRect(8, 8, 204, 284)
         painter.setPen(QColor(ACCENT))
         painter.drawRect(14, 14, 192, 272)
-        painter.setPen(QColor(SECONDARY))
+        painter.setPen(QColor(border))
         painter.drawText(img.rect(), Qt.AlignmentFlag.AlignCenter, label)
         painter.end()
         return img

@@ -2,30 +2,57 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
+import "."
 
 Window {
     id: rootWindow
     objectName: "coquetteMainWindow"
     width: themePalette.initialWidth
     height: themePalette.initialHeight
-    minimumWidth: 1024
-    minimumHeight: 600
+    minimumWidth: Theme.minWindowWidth
+    minimumHeight: Theme.minWindowHeight
     visible: true
     title: "Coquette PDF Studio — Floral Stationery Suite"
-    color: themePalette.surfaceLight
+    color: Theme.surfaceLight
     flags: Qt.Window | Qt.FramelessWindowHint
 
     property string pendingPasswordFilePath: ""
     property string pendingPasswordFileName: ""
     property bool showSuccessModal: false
     property string completedSummaryText: ""
+    property string friendlyNoticeText: ""
 
-    // Atajo global Ctrl + K para enfocar el buscador rápido de herramientas
     Shortcut {
-        sequence: "Ctrl+K"
+        sequence: "Escape"
         onActivated: {
-            quickSearchInput.forceActiveFocus()
-            quickSearchInput.selectAll()
+            if (passwordPopup.opened) {
+                passwordPopup.close()
+            } else if (completionPopup.opened) {
+                completionPopup.close()
+            } else if (studioBridge.isBusy) {
+                studioBridge.cancelActiveOperation()
+            } else if (studioBridge.isToolSelected) {
+                studioBridge.returnToWorkbench()
+            }
+        }
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Return", "Ctrl+Enter"]
+        onActivated: {
+            if (!passwordPopup.opened && !completionPopup.opened && studioBridge.validFileCount > 0) {
+                studioBridge.triggerPrimaryAction()
+            }
+        }
+    }
+
+    Timer {
+        id: friendlyNoticeTimer
+        interval: 4500
+        repeat: false
+        onTriggered: {
+            rootWindow.friendlyNoticeText = ""
+            studioBridge.clearNoticeMessage()
         }
     }
 
@@ -36,499 +63,392 @@ Window {
             rootWindow.pendingPasswordFileName = fileName
             passwordModalInput.text = ""
             passwordPopup.open()
+            passwordModalInput.forceActiveFocus()
         }
         function onOperationCompleted(message, firstFile, folderPath) {
             rootWindow.completedSummaryText = message
             rootWindow.showSuccessModal = true
             completionPopup.open()
+            waxSealStampAnim.restart()
+        }
+        function onErrorOccurred(errorMessage) {
+            rootWindow.friendlyNoticeText = errorMessage
+            friendlyNoticeTimer.restart()
+        }
+        function onFilesChanged() {
+            if (!studioBridge.hasLockedFiles && passwordPopup.opened) {
+                passwordPopup.close()
+            }
         }
     }
 
-    // Layout Principal (Split-View Asimétrico: Sidebar fijo de 260px + Lienzo Central fluido)
-    Row {
+    // LIENZO PRINCIPAL UNIFICADO (100% del ancho de la ventana sin barra lateral)
+    Rectangle {
+        id: mainWorkspace
+        objectName: "mainWorkspace"
         anchors.fill: parent
-        spacing: 0
+        color: Theme.surfaceLight
 
-        // 1. PANEL LATERAL IZQUIERDO (Sidebar fijo de 260px en #1E0F16 simulando pasta de cuaderno)
-        Rectangle {
-            id: leftSidebar
-            objectName: "leftSidebar"
-            width: themePalette.sidebarWidth
+        // Renglones horizontales muy sutiles estilo hoja de cuaderno
+        Canvas {
+            anchors.fill: parent
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+
+                ctx.strokeStyle = "#E8D2D5"
+                ctx.lineWidth = 1.0
+                ctx.globalAlpha = 0.45
+                for (var lineY = 56; lineY < height; lineY += 24) {
+                    ctx.beginPath()
+                    ctx.moveTo(0, lineY)
+                    ctx.lineTo(width, lineY)
+                    ctx.stroke()
+                }
+            }
+            onWidthChanged: requestPaint()
+            onHeightChanged: requestPaint()
+        }
+
+        // Detalle gráfico pintado de espiral de libreta en el borde izquierdo del cuaderno
+        Canvas {
+            id: spiralCanvas
+            objectName: "spiralBindingCanvas"
+            width: 24
             height: parent.height
-            color: themePalette.backgroundDark
+            anchors.left: parent.left
+            z: 5
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var step = 28
+                for (var y = 22; y < height - 16; y += step) {
+                    ctx.fillStyle = "#3D1220"
+                    ctx.beginPath()
+                    ctx.arc(17, y, 3.8, 0, Math.PI * 2)
+                    ctx.fill()
 
-            // Detalle gráfico pintado de espiral de libreta en el borde izquierdo
-            Canvas {
-                id: spiralCanvas
-                width: 24
-                height: parent.height
-                anchors.left: parent.left
-                onPaint: {
-                    var ctx = getContext("2d")
-                    ctx.reset()
-                    var step = 28
-                    for (var y = 22; y < height - 16; y += step) {
-                        // Perforación circular
-                        ctx.fillStyle = "#0D0609"
-                        ctx.beginPath()
-                        ctx.arc(17, y, 4.0, 0, Math.PI * 2)
-                        ctx.fill()
+                    ctx.strokeStyle = "#681D3A"
+                    ctx.lineWidth = 2.4
+                    ctx.beginPath()
+                    ctx.moveTo(2, y - 4)
+                    ctx.bezierCurveTo(9, y - 8, 16, y - 5, 17, y)
+                    ctx.bezierCurveTo(16, y + 5, 9, y + 8, 2, y + 4)
+                    ctx.stroke()
 
-                        // Anillo metálico en tono coral pastel (#F8B8B0) y vino (#681D3A)
-                        ctx.strokeStyle = "#F8B8B0"
-                        ctx.lineWidth = 2.0
-                        ctx.beginPath()
-                        ctx.moveTo(2, y - 4)
-                        ctx.bezierCurveTo(9, y - 8, 16, y - 5, 17, y)
-                        ctx.bezierCurveTo(16, y + 5, 9, y + 8, 2, y + 4)
-                        ctx.stroke()
+                    ctx.strokeStyle = "#F8B8B0"
+                    ctx.lineWidth = 1.4
+                    ctx.beginPath()
+                    ctx.moveTo(2, y - 4)
+                    ctx.bezierCurveTo(9, y - 8, 16, y - 5, 17, y)
+                    ctx.bezierCurveTo(16, y + 5, 9, y + 8, 2, y + 4)
+                    ctx.stroke()
+                }
+            }
+            onHeightChanged: requestPaint()
+        }
+
+        // 1. Barra de Título Personalizada (FramelessWindowHint) con subtítulo corto
+        Rectangle {
+            id: customTitleBar
+            objectName: "customTitleBar"
+            width: parent.width
+            height: 62
+            color: "transparent"
+
+            readonly property int headerTopMargin: 20
+
+            MouseArea {
+                anchors.fill: parent
+                anchors.rightMargin: 140
+                onPressed: rootWindow.startSystemMove()
+                onDoubleClicked: {
+                    if (rootWindow.visibility === Window.Maximized) {
+                        rootWindow.showNormal()
+                    } else {
+                        rootWindow.showMaximized()
                     }
                 }
-                onHeightChanged: requestPaint()
             }
 
-            Item {
-                id: sidebarContentArea
-                anchors.fill: parent
-                anchors.leftMargin: 24
-                anchors.rightMargin: 6
-                anchors.topMargin: 10
-                anchors.bottomMargin: 8
+            Row {
+                objectName: "headerTitleRow"
+                anchors.left: parent.left
+                anchors.leftMargin: 32
+                anchors.top: parent.top
+                anchors.topMargin: customTitleBar.headerTopMargin
+                spacing: 12
 
-                // Título editorial de la aplicación en la parte superior del cuaderno
-                Column {
-                    id: headerTitleColumn
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    spacing: 1
-
-                    Text {
-                        objectName: "sidebarTitleText"
-                        // Ancho acotado + salto de línea: evita truncar a mitad de palabra con DPI alto
-                        width: parent.width
-                        text: "Herramientas para PDFs"
-                        font.family: themePalette.serifFont
-                        font.pixelSize: 17
-                        font.bold: true
-                        color: themePalette.surfaceLight
-                        wrapMode: Text.WordWrap
-                        maximumLineCount: 2
-                        elide: Text.ElideRight
-                    }
-
-                    Text {
-                        width: parent.width
-                        text: "Herramientas de Estación Floral"
-                        font.family: themePalette.scriptFont
-                        font.italic: true
-                        font.pixelSize: 12
-                        color: themePalette.accent
-                        elide: Text.ElideRight
-                    }
+                PillButton {
+                    id: backToWorkbenchButton
+                    objectName: "backToWorkbenchButton"
+                    visible: studioBridge.isToolSelected && studioBridge.fileCount > 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 30
+                    horizontalPadding: 14
+                    text: "← Volver a la mesa de trabajo"
+                    primaryStyle: false
+                    solidShadow: false
+                    onClicked: studioBridge.returnToWorkbench()
                 }
 
-                // Divisor horizontal con ícono de flor central (✿) en tono rosa pastel
-                Item {
-                    id: sidebarFloralDivider
-                    anchors.top: headerTitleColumn.bottom
-                    anchors.topMargin: 5
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.rightMargin: 6
-                    height: 14
-
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.right: dividerFlowerText.left
-                        anchors.rightMargin: 8
-                        anchors.verticalCenter: parent.verticalCenter
-                        height: 1
-                        color: "#5A2D3A"
-                    }
-
-                    Text {
-                        id: dividerFlowerText
-                        anchors.centerIn: parent
-                        text: "✿"
-                        font.pixelSize: 11
-                        color: themePalette.accent
-                    }
-
-                    Rectangle {
-                        anchors.left: dividerFlowerText.right
-                        anchors.leftMargin: 8
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        height: 1
-                        color: "#5A2D3A"
-                    }
+                Text {
+                    id: headerPrimaryTitle
+                    objectName: "headerPrimaryTitle"
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: studioBridge.isToolSelected && studioBridge.fileCount > 0
+                          ? studioBridge.activeToolTitle
+                          : "Mesa de Trabajo Floral"
+                    font.family: Theme.serifFont
+                    font.pixelSize: Theme.fontWindowTitleSize
+                    font.bold: true
+                    color: Theme.textPrimary
                 }
 
-                // Buscador Rápido de Herramientas (Ctrl + K) con fondo oscuro #3A1822 y borde #6E3B49
+                Text {
+                    id: headerSubtitleText
+                    objectName: "headerSubtitleText"
+                    anchors.baseline: headerPrimaryTitle.baseline
+                    text: "— " + (studioBridge.isToolSelected && studioBridge.fileCount > 0
+                                  ? studioBridge.activeToolSubtitle
+                                  : studioBridge.workbenchSubtitle)
+                    font.family: Theme.scriptFont
+                    font.italic: true
+                    font.pixelSize: 14
+                    color: Theme.textSecondary
+                }
+            }
+
+            // Controles de ventana (minimizar, maximizar, cerrar)
+            Row {
+                anchors.right: parent.right
+                anchors.rightMargin: 16
+                anchors.top: parent.top
+                anchors.topMargin: customTitleBar.headerTopMargin + 1
+                spacing: 8
+
                 Rectangle {
-                    id: searchBoxContainer
-                    anchors.top: sidebarFloralDivider.bottom
-                    anchors.topMargin: 5
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.rightMargin: 4
-                    height: 32
-                    radius: 8
-                    color: themePalette.searchBgDark
-                    border.width: quickSearchInput.activeFocus ? 1.8 : 1.0
-                    border.color: quickSearchInput.activeFocus ? themePalette.accent : themePalette.searchBorderDark
+                    id: minBtn
+                    width: 26; height: 26; radius: 13
+                    color: Theme.accentPeach
+                    border.width: 1; border.color: Theme.borderSubtleColor
+                    Text { anchors.centerIn: parent; text: "—"; font.bold: true; color: Theme.textPrimary }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: rootWindow.showMinimized() }
+                }
 
-                    Row {
-                        anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 8
-                        spacing: 6
-
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "⌕"
-                            font.pixelSize: 14
-                            color: "#D8B4BE"
-                        }
-
-                        TextInput {
-                            id: quickSearchInput
-                            objectName: "quickSearchInput"
-                            width: parent.width - 72
-                            anchors.verticalCenter: parent.verticalCenter
-                            font.family: themePalette.sansFont
-                            font.pixelSize: 12
-                            color: "#FBF0F0"
-                            onTextChanged: studioBridge.setSearchQuery(text)
-
-                            Text {
-                                visible: parent.text.length === 0 && !parent.activeFocus
-                                text: "Buscar herramienta..."
-                                font.family: themePalette.sansFont
-                                font.pixelSize: 11
-                                color: "#C69DA8"
-                            }
-                        }
-
-                        Rectangle {
-                            width: 44
-                            height: 18
-                            radius: 9
-                            anchors.verticalCenter: parent.verticalCenter
-                            color: themePalette.searchBadgeSalmon
-                            Text {
-                                anchors.centerIn: parent
-                                text: "Ctrl+K"
-                                font.family: themePalette.sansFont
-                                font.pixelSize: 9
-                                font.bold: true
-                                color: "#2D1018"
+                Rectangle {
+                    id: maxBtn
+                    width: 26; height: 26; radius: 13
+                    color: Theme.primaryRose
+                    border.width: 1; border.color: Theme.borderSubtleColor
+                    Text { anchors.centerIn: parent; text: "▢"; font.bold: true; color: Theme.textPrimary }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler {
+                        onTapped: {
+                            if (rootWindow.visibility === Window.Maximized) {
+                                rootWindow.showNormal()
+                            } else {
+                                rootWindow.showMaximized()
                             }
                         }
                     }
                 }
 
-                // Contenedor desplazable (Flickable con clip: true) para que ninguna tarjeta quede cortada
-                Flickable {
-                    id: sidebarToolsList
-                    objectName: "sidebarToolsList"
-                    anchors.top: searchBoxContainer.bottom
-                    anchors.topMargin: 8
-                    anchors.bottom: parent.bottom
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    contentWidth: width
-                    contentHeight: sidebarCardsColumn.implicitHeight + 6
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
+                Rectangle {
+                    id: closeBtn
+                    width: 26; height: 26; radius: 13
+                    color: Theme.secondaryWine
+                    border.width: 1; border.color: Theme.wineDarkCard
+                    Text { anchors.centerIn: parent; text: "✕"; font.bold: true; color: Theme.surfaceCard }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: rootWindow.close() }
+                }
+            }
 
-                    ScrollBar.vertical: ScrollBar {
-                        policy: ScrollBar.AsNeeded
-                        width: 6
-                    }
+            // Línea divisoria fina debajo de la cabecera
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: 30
+                anchors.rightMargin: 20
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 2
+                height: 1
+                color: Theme.borderSubtleColor
+            }
+        }
 
-                    Column {
-                        id: sidebarCardsColumn
-                        objectName: "sidebarCardsColumn"
-                        width: parent.width
-                        spacing: 4
+        // Banner amigable de aviso para formatos no soportados, duplicados o archivos dañados
+        Rectangle {
+            id: friendlyNoticeBanner
+            objectName: "friendlyNoticeBanner"
+            visible: rootWindow.friendlyNoticeText.length > 0
+            z: 20
+            anchors.top: customTitleBar.bottom
+            anchors.topMargin: 8
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width - 80, Math.max(380, noticeBannerLabel.implicitWidth + 96))
+            height: 36
+            radius: 18
+            color: studioBridge.lastNoticeIsError ? Theme.errorBg : "#FAF3F2"
+            border.width: Theme.borderSubtleWidth
+            border.color: studioBridge.lastNoticeIsError ? Theme.errorBorder : Theme.borderSubtleColor
 
-                        Repeater {
-                            model: studioBridge.filteredTools
-                            delegate: SidebarCard {
-                                toolId: modelData.id
-                                title: modelData.title
-                                subtitle: modelData.subtitle
-                                badgeLetter: modelData.badge
-                                isActive: studioBridge.activeTool === modelData.id
-                                onSelected: function(id) { studioBridge.setActiveTool(id) }
-                            }
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 12
+                spacing: 8
+
+                Text {
+                    text: "✿"
+                    font.pixelSize: 13
+                    color: studioBridge.lastNoticeIsError ? Theme.errorText : Theme.secondaryWine
+                }
+
+                Text {
+                    id: noticeBannerLabel
+                    objectName: "friendlyNoticeTextItem"
+                    Layout.fillWidth: true
+                    text: rootWindow.friendlyNoticeText
+                    font.family: Theme.sansFont
+                    font.pixelSize: 12
+                    font.bold: true
+                    color: studioBridge.lastNoticeIsError ? Theme.errorText : Theme.textPrimary
+                    elide: Text.ElideRight
+                }
+
+                Rectangle {
+                    width: 24; height: 24; radius: 12
+                    color: "transparent"
+                    border.width: 1; border.color: Theme.borderSubtleColor
+                    Text { anchors.centerIn: parent; text: "✕"; font.pixelSize: 10; font.bold: true; color: Theme.textPrimary }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler {
+                        onTapped: {
+                            friendlyNoticeTimer.stop()
+                            rootWindow.friendlyNoticeText = ""
+                            studioBridge.clearNoticeMessage()
                         }
                     }
                 }
             }
         }
 
-        // 2. LIENZO CENTRAL (Main Workspace fluido en #FBF0F0 con renglones sutiles de cuaderno)
-        Rectangle {
-            id: mainWorkspace
-            objectName: "mainWorkspace"
-            width: parent.width - leftSidebar.width
-            height: parent.height
-            color: themePalette.surfaceLight
+        // 2. Contenedor principal de trabajo y barra de acción inferior
+        Item {
+            anchors.top: friendlyNoticeBanner.visible ? friendlyNoticeBanner.bottom : customTitleBar.bottom
+            anchors.topMargin: 6
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.leftMargin: 30
+            anchors.rightMargin: 20
+            anchors.bottomMargin: 14
 
-            // Renglones horizontales muy sutiles estilo hoja de cuaderno y detalles botánicos
-            Canvas {
-                anchors.fill: parent
-                onPaint: {
-                    var ctx = getContext("2d")
-                    ctx.reset()
-
-                    // Renglones horizontales sutiles en todo el lienzo
-                    ctx.strokeStyle = "#E8D2D5"
-                    ctx.lineWidth = 1.0
-                    ctx.globalAlpha = 0.52
-                    for (var lineY = 56; lineY < height; lineY += 24) {
-                        ctx.beginPath()
-                        ctx.moveTo(0, lineY)
-                        ctx.lineTo(width, lineY)
-                        ctx.stroke()
-                    }
-                }
-                onWidthChanged: requestPaint()
-                onHeightChanged: requestPaint()
-            }
-
-            // 2.1 Barra de Título Personalizada (FramelessWindowHint) con doble línea horizontal fina debajo
-            Rectangle {
-                id: customTitleBar
-                objectName: "customTitleBar"
-                width: parent.width
-                height: 64
-                color: "transparent"
-
-                // Margen superior de la cabecera para dar respiración visual al título
-                readonly property int headerTopMargin: 20
-
-                MouseArea {
-                    anchors.fill: parent
-                    anchors.rightMargin: 140
-                    onPressed: rootWindow.startSystemMove()
-                    onDoubleClicked: {
-                        if (rootWindow.visibility === Window.Maximized) {
-                            rootWindow.showNormal()
-                        } else {
-                            rootWindow.showMaximized()
-                        }
-                    }
-                }
-
-                Row {
-                    objectName: "headerTitleRow"
-                    anchors.left: parent.left
-                    anchors.leftMargin: 22
-                    anchors.top: parent.top
-                    anchors.topMargin: customTitleBar.headerTopMargin
-                    spacing: 10
-
-                    Text {
-                        text: studioBridge.activeToolTitle
-                        font.family: themePalette.serifFont
-                        font.pixelSize: 22
-                        font.bold: true
-                        color: "#3D1220"
-                    }
-
-                    Text {
-                        anchors.baseline: parent.children[0].baseline
-                        text: "— " + studioBridge.activeToolSubtitle
-                        font.family: themePalette.scriptFont
-                        font.italic: true
-                        font.pixelSize: 15
-                        color: "#8C465A"
-                    }
-                }
-
-                // Controles de ventana (minimizar, maximizar, cerrar) integrados en la estética
-                Row {
-                    anchors.right: parent.right
-                    anchors.rightMargin: 16
-                    anchors.top: parent.top
-                    anchors.topMargin: customTitleBar.headerTopMargin + 1
-                    spacing: 8
-
-                    Rectangle {
-                        id: minBtn
-                        width: 26; height: 26; radius: 13
-                        color: themePalette.accent
-                        border.width: 1; border.color: themePalette.secondary
-                        Text { anchors.centerIn: parent; text: "—"; font.bold: true; color: themePalette.backgroundDark }
-                        TapHandler { onTapped: rootWindow.showMinimized() }
-                    }
-
-                    Rectangle {
-                        id: maxBtn
-                        width: 26; height: 26; radius: 13
-                        color: themePalette.primary
-                        border.width: 1; border.color: themePalette.secondary
-                        Text { anchors.centerIn: parent; text: "▢"; font.bold: true; color: themePalette.backgroundDark }
-                        TapHandler {
-                            onTapped: {
-                                if (rootWindow.visibility === Window.Maximized) {
-                                    rootWindow.showNormal()
-                                } else {
-                                    rootWindow.showMaximized()
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        id: closeBtn
-                        width: 26; height: 26; radius: 13
-                        color: themePalette.secondary
-                        border.width: 1; border.color: themePalette.backgroundDark
-                        Text { anchors.centerIn: parent; text: "✕"; font.bold: true; color: themePalette.surfaceLight }
-                        TapHandler { onTapped: rootWindow.close() }
-                    }
-                }
-
-                // Doble línea horizontal fina de lado a lado debajo de la cabecera
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.leftMargin: 20
-                    anchors.rightMargin: 20
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 4
-                    height: 1
-                    color: "#B98592"
-                    opacity: 0.75
-                }
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.leftMargin: 20
-                    anchors.rightMargin: 20
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 1
-                    height: 1
-                    color: "#D8AEB8"
-                    opacity: 0.75
-                }
-            }
-
-            // 2.2 Contenedor central tipo hoja de papel enmarcado
-            Item {
-                anchors.top: customTitleBar.bottom
-                anchors.topMargin: 6
+            // Zona 3 - Barra de Acción (siempre visible, anclada abajo, ~64 px)
+            FooterBar {
+                id: bottomFooterBar
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                anchors.leftMargin: 20
-                anchors.rightMargin: 20
-                anchors.bottomMargin: 14
+                height: Theme.actionBarHeight
+            }
 
-                Rectangle {
-                    id: outerPaperFrame
-                    anchors.top: parent.top
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    height: parent.height - 166
-                    radius: 12
-                    color: themePalette.stationeryFrameBg
-                    border.width: 1.3
-                    border.color: "#8E4A5E"
+            // Barra de ajustes específicos (SOLO visible cuando se abre una herramienta con opciones)
+            ConfigPanels {
+                id: bottomConfigPanel
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: bottomFooterBar.top
+                anchors.bottomMargin: visible ? 10 : 0
+                height: visible ? 72 : 0
+            }
 
-                    // Esquinas botánicas (SVG 1.2 Tiny): un solo motivo reflejado con Scale.
-                    // Quedan bajo las vistas (z menor) y con margen interno para no recortarse.
-                    Repeater {
-                        model: [
-                            { name: "TopLeft",     sx: 1,  sy: -1 },
-                            { name: "TopRight",    sx: -1, sy: -1 },
-                            { name: "BottomLeft",  sx: 1,  sy: 1 },
-                            { name: "BottomRight", sx: -1, sy: 1 }
-                        ]
-                        delegate: Image {
-                            objectName: "botanicalCorner" + modelData.name
-                            readonly property int cornerSize: 76
-                            readonly property int cornerMargin: 14
-                            z: 0
-                            width: cornerSize
-                            height: cornerSize
-                            sourceSize.width: cornerSize * 2
-                            sourceSize.height: cornerSize * 2
-                            source: "../../assets/icons/botanical_corner.svg"
-                            fillMode: Image.PreserveAspectFit
-                            smooth: true
-                            opacity: 0.22
-                            // El motivo base apunta a la esquina inferior-izquierda; sy = -1 lo lleva arriba
-                            x: modelData.sx > 0 ? cornerMargin : parent.width - cornerSize - cornerMargin
-                            y: modelData.sy < 0 ? cornerMargin : parent.height - cornerSize - cornerMargin
-                            transform: Scale {
-                                origin.x: width / 2
-                                origin.y: height / 2
-                                xScale: modelData.sx
-                                yScale: modelData.sy
-                            }
+            // Lienzo principal de trabajo (sin cajas anidadas cuando hay archivos en la mesa)
+            Rectangle {
+                id: outerPaperFrame
+                objectName: "outerPaperFrame"
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: bottomConfigPanel.visible ? bottomConfigPanel.top : bottomFooterBar.top
+                anchors.bottomMargin: 10
+                radius: 14
+                color: (studioBridge.fileCount === 0 || studioBridge.isToolSelected)
+                       ? Theme.stationeryFrameBg
+                       : "transparent"
+                border.width: (studioBridge.fileCount === 0 || studioBridge.isToolSelected)
+                              ? Theme.borderSubtleWidth
+                              : 0
+                border.color: Theme.borderSubtleColor
+
+                // Ramitas botánicas en las esquinas: SOLO visibles en el estado vacío
+                Repeater {
+                    model: [
+                        { name: "TopLeft",     sx: 1,  sy: -1 },
+                        { name: "TopRight",    sx: -1, sy: -1 },
+                        { name: "BottomLeft",  sx: 1,  sy: 1 },
+                        { name: "BottomRight", sx: -1, sy: 1 }
+                    ]
+                    delegate: Image {
+                        objectName: "botanicalCorner" + modelData.name
+                        visible: studioBridge.fileCount === 0
+                        readonly property int cornerSize: 76
+                        readonly property int cornerMargin: 14
+                        z: 0
+                        width: cornerSize
+                        height: cornerSize
+                        sourceSize.width: cornerSize * 2
+                        sourceSize.height: cornerSize * 2
+                        source: "../../assets/icons/botanical_corner.svg"
+                        fillMode: Image.PreserveAspectFit
+                        smooth: true
+                        opacity: 0.22
+                        x: modelData.sx > 0 ? cornerMargin : parent.width - cornerSize - cornerMargin
+                        y: modelData.sy < 0 ? cornerMargin : parent.height - cornerSize - cornerMargin
+                        transform: Scale {
+                            origin.x: width / 2
+                            origin.y: height / 2
+                            xScale: modelData.sx
+                            yScale: modelData.sy
                         }
                     }
-                    // Marco interior para las vistas de trabajo
-                    Item {
-                        id: innerPaperFrame
+                }
+
+                Item {
+                    id: innerPaperFrame
+                    anchors.fill: parent
+                    anchors.margins: (studioBridge.fileCount === 0 || studioBridge.isToolSelected) ? 8 : 0
+
+                    DropzoneView {
                         anchors.fill: parent
-                        anchors.margins: 8
-
-                        // Vistas intercambiables según la herramienta activa
-                        DropzoneView {
-                            anchors.fill: parent
-                            visible: studioBridge.workspaceMode === "dropzone" || studioBridge.fileCount === 0
-                        }
-
-                        PageOrganizerView {
-                            anchors.fill: parent
-                            visible: studioBridge.workspaceMode === "organizer" && studioBridge.fileCount > 0
-                        }
-
-                        PdfViewerSignView {
-                            anchors.fill: parent
-                            visible: studioBridge.workspaceMode === "viewer" && studioBridge.fileCount > 0
-                        }
+                        visible: !studioBridge.isToolSelected || studioBridge.workspaceMode === "dropzone" || studioBridge.fileCount === 0
                     }
-                }
 
-                // 2.3 Paneles de Configuración Inferior (Tarjetas modulares dinámicas)
-                ConfigPanels {
-                    id: bottomConfigPanel
-                    anchors.top: outerPaperFrame.bottom
-                    anchors.topMargin: 10
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    height: 92
-                }
+                    PageOrganizerView {
+                        anchors.fill: parent
+                        visible: studioBridge.isToolSelected && studioBridge.workspaceMode === "organizer" && studioBridge.fileCount > 0
+                    }
 
-                // 2.4 Barra de Estado y Progreso (Footer)
-                FooterBar {
-                    id: bottomFooterBar
-                    anchors.top: bottomConfigPanel.bottom
-                    anchors.topMargin: 10
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    height: 54
+                    PdfViewerSignView {
+                        anchors.fill: parent
+                        visible: studioBridge.isToolSelected && studioBridge.workspaceMode === "viewer" && studioBridge.fileCount > 0
+                    }
                 }
             }
         }
     }
 
-    // Modal Estilizado Centrado para Desbloquear PDF Protegido al cargarlo
+    // Modal Estilizado Centrado para Desbloquear PDF Protegido ("Abrir sello")
     Popup {
         id: passwordPopup
         objectName: "passwordPopup"
         parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
         width: 440
-        height: 220
+        height: 224
         modal: true
         focus: true
         padding: 0
@@ -539,10 +459,10 @@ Window {
         }
 
         background: Rectangle {
-            radius: 14
-            color: themePalette.surfaceLight
-            border.width: 2
-            border.color: themePalette.secondary
+            radius: 16
+            color: Theme.surfaceLight
+            border.width: Theme.borderStrongWidth
+            border.color: Theme.secondaryWine
         }
 
         contentItem: ColumnLayout {
@@ -551,38 +471,41 @@ Window {
             spacing: 12
 
             Text {
-                text: "Documento Sellado con Contraseña"
-                font.family: themePalette.serifFont
-                font.pixelSize: 17
+                text: "Abrir sello del pliego"
+                font.family: Theme.serifFont
+                font.pixelSize: 18
                 font.bold: true
-                color: themePalette.backgroundDark
+                color: Theme.textPrimary
             }
 
             Text {
                 Layout.fillWidth: true
-                text: "Ingresa la clave para abrir '" + rootWindow.pendingPasswordFileName + "':"
-                font.family: themePalette.sansFont
-                font.pixelSize: 12
-                color: themePalette.secondary
+                text: "Ingresa la clave para leer '" + rootWindow.pendingPasswordFileName + "':"
+                font.family: Theme.sansFont
+                font.pixelSize: 13
+                color: Theme.textSecondary
                 elide: Text.ElideMiddle
             }
 
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 36
+                Layout.preferredHeight: 38
                 radius: 8
                 color: "#FFFFFF"
-                border.width: 1.4
-                border.color: themePalette.secondary
+                border.width: Theme.borderSubtleWidth
+                border.color: Theme.borderSubtleColor
 
                 TextInput {
                     id: passwordModalInput
+                    objectName: "passwordModalInput"
                     anchors.fill: parent
                     anchors.margins: 8
+                    verticalAlignment: TextInput.AlignVCenter
                     echoMode: TextInput.Password
-                    font.family: themePalette.sansFont
-                    font.pixelSize: 13
-                    color: themePalette.backgroundDark
+                    font.family: Theme.sansFont
+                    font.pixelSize: 14
+                    color: Theme.textPrimary
+                    onAccepted: unlockSubmitBtn.clicked()
                 }
             }
 
@@ -593,16 +516,20 @@ Window {
                 Item { Layout.fillWidth: true }
 
                 PillButton {
-                    height: 34
-                    text: "Omitir"
+                    height: 36
+                    text: "Más tarde"
                     primaryStyle: false
+                    solidShadow: false
                     onClicked: passwordPopup.close()
                 }
 
                 PillButton {
-                    height: 34
-                    text: "Desbloquear Pliego"
+                    id: unlockSubmitBtn
+                    objectName: "unlockSubmitBtn"
+                    height: 36
+                    text: "Abrir sello"
                     primaryStyle: true
+                    solidShadow: true
                     onClicked: {
                         var ok = studioBridge.supplyFilePassword(
                             rootWindow.pendingPasswordFilePath,
@@ -617,52 +544,96 @@ Window {
         }
     }
 
-    // Popup de Éxito Centrado en Overlay.overlay ("¡Pliego Procesado con Éxito!")
+    // Popup de Éxito Centrado con animación de sello de lacre y "Original intacto ✓"
     Popup {
         id: completionPopup
         objectName: "completionPopup"
         parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
         width: 520
-        height: 220
+        height: 244
         modal: true
         focus: true
         padding: 0
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         onClosed: rootWindow.showSuccessModal = false
 
+        ParallelAnimation {
+            id: waxSealStampAnim
+            NumberAnimation {
+                target: waxSealBadge
+                property: "scale"
+                from: 1.45
+                to: 1.0
+                duration: 180
+                easing.type: Easing.OutBack
+            }
+            NumberAnimation {
+                target: waxSealBadge
+                property: "opacity"
+                from: 0.2
+                to: 1.0
+                duration: 150
+            }
+        }
+
         Overlay.modal: Rectangle {
             color: "#771E0F16"
         }
 
         background: Rectangle {
-            radius: 14
-            color: themePalette.surfaceLight
-            border.width: 2
-            border.color: themePalette.secondary
+            radius: 16
+            color: Theme.surfaceLight
+            border.width: Theme.borderStrongWidth
+            border.color: Theme.secondaryWine
         }
 
         contentItem: ColumnLayout {
             anchors.fill: parent
             anchors.margins: 24
-            spacing: 14
+            spacing: 12
 
             RowLayout {
                 Layout.alignment: Qt.AlignHCenter
                 spacing: 10
 
                 Rectangle {
-                    width: 32; height: 32; radius: 16
-                    color: themePalette.secondary
-                    Text { anchors.centerIn: parent; text: "✓"; font.bold: true; color: themePalette.surfaceLight }
+                    id: waxSealBadge
+                    objectName: "waxSealBadge"
+                    width: 36; height: 36; radius: 18
+                    color: Theme.secondaryWine
+                    border.width: 1.5
+                    border.color: Theme.accentPeach
+                    Text { anchors.centerIn: parent; text: "✓"; font.pixelSize: 16; font.bold: true; color: Theme.surfaceCard }
                 }
 
                 Text {
-                    text: "¡Pliego Procesado con Éxito!"
-                    font.family: themePalette.serifFont
-                    font.pixelSize: 18
+                    text: "¡Pliego procesado con éxito!"
+                    font.family: Theme.serifFont
+                    font.pixelSize: 19
                     font.bold: true
-                    color: themePalette.backgroundDark
+                    color: Theme.textPrimary
+                }
+            }
+
+            Rectangle {
+                objectName: "modalOriginalIntactBadge"
+                Layout.alignment: Qt.AlignHCenter
+                height: 26
+                width: modalIntactLabel.implicitWidth + 18
+                radius: 13
+                color: "#EDF5EE"
+                border.width: 1
+                border.color: "#8FA88A"
+
+                Text {
+                    id: modalIntactLabel
+                    anchors.centerIn: parent
+                    text: "Original intacto ✓"
+                    font.family: Theme.sansFont
+                    font.pixelSize: 12
+                    font.bold: true
+                    color: "#2F5233"
                 }
             }
 
@@ -670,9 +641,9 @@ Window {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 text: rootWindow.completedSummaryText
-                font.family: themePalette.sansFont
+                font.family: Theme.sansFont
                 font.pixelSize: 13
-                color: themePalette.secondary
+                color: Theme.textSecondary
                 wrapMode: Text.WordWrap
             }
 
@@ -681,9 +652,11 @@ Window {
                 spacing: 10
 
                 PillButton {
-                    height: 34
-                    text: "Abrir Archivo"
+                    objectName: "modalOpenFileBtn"
+                    height: 36
+                    text: "Abrir archivo"
                     primaryStyle: true
+                    solidShadow: true
                     onClicked: {
                         studioBridge.openFileInSystem(studioBridge.lastOutputFile)
                         completionPopup.close()
@@ -691,9 +664,11 @@ Window {
                 }
 
                 PillButton {
-                    height: 34
-                    text: "Mostrar en Carpeta"
+                    objectName: "modalShowFolderBtn"
+                    height: 36
+                    text: "Mostrar en carpeta"
                     primaryStyle: false
+                    solidShadow: false
                     onClicked: {
                         studioBridge.showFileInFolder(studioBridge.lastOutputFile)
                         completionPopup.close()
@@ -701,9 +676,10 @@ Window {
                 }
 
                 PillButton {
-                    height: 34
+                    height: 36
                     text: "Cerrar"
                     primaryStyle: false
+                    solidShadow: false
                     onClicked: completionPopup.close()
                 }
             }

@@ -1,0 +1,10 @@
+singleton Theme 1.0 Theme.qml
+AnimatedSwitch 1.0 AnimatedSwitch.qml
+ConfigPanels 1.0 ConfigPanels.qml
+DropzoneView 1.0 DropzoneView.qml
+FooterBar 1.0 FooterBar.qml
+PageOrganizerView 1.0 PageOrganizerView.qml
+PdfViewerSignView 1.0 PdfViewerSignView.qml
+PillButton 1.0 PillButton.qml
+SidebarCard 1.0 SidebarCard.qml
+

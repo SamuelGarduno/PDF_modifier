@@ -153,6 +153,14 @@ class ThumbnailLRUCache:
         with self._lock:
             self._store.clear()
 
+    def remove_for_file(self, resolved_file_path: str) -> None:
+        with self._lock:
+            keys_to_remove = [
+                k for k in self._store if k[0] == resolved_file_path
+            ]
+            for k in keys_to_remove:
+                self._store.pop(k, None)
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._store)
