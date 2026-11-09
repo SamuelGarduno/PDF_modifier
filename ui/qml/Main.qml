@@ -7,14 +7,29 @@ import "."
 Window {
     id: rootWindow
     objectName: "coquetteMainWindow"
-    width: themePalette.initialWidth
-    height: themePalette.initialHeight
-    minimumWidth: Theme.minWindowWidth
-    minimumHeight: Theme.minWindowHeight
+
+    readonly property real availableScreenWidth: (Screen.width > 0 && Screen.desktopAvailableWidth > 0)
+                                                 ? Math.min(Screen.width, Screen.desktopAvailableWidth)
+                                                 : 1920
+    readonly property real availableScreenHeight: Screen.desktopAvailableHeight > 0
+                                                  ? Screen.desktopAvailableHeight
+                                                  : 1080
+
+    width: Math.min(Theme.initialWidth, Math.round(availableScreenWidth * 0.9))
+    height: Math.min(Theme.initialHeight, Math.round(availableScreenHeight * 0.9))
+    minimumWidth: Math.min(Theme.minWindowWidth, Math.round(availableScreenWidth * 0.9))
+    minimumHeight: Math.min(Theme.minWindowHeight, Math.round(availableScreenHeight * 0.9))
     visible: true
     title: "Coquette PDF Studio — Floral Stationery Suite"
     color: Theme.surfaceLight
     flags: Qt.Window | Qt.FramelessWindowHint
+
+    Component.onCompleted: {
+        if (rootWindow.availableScreenWidth > 0 && rootWindow.availableScreenHeight > 0) {
+            rootWindow.x = Math.max(0, Math.round(Screen.virtualX + (rootWindow.availableScreenWidth - rootWindow.width) / 2))
+            rootWindow.y = Math.max(0, Math.round(Screen.virtualY + (rootWindow.availableScreenHeight - rootWindow.height) / 2))
+        }
+    }
 
     property string pendingPasswordFilePath: ""
     property string pendingPasswordFileName: ""
@@ -171,19 +186,23 @@ Window {
                 }
             }
 
-            Row {
+            RowLayout {
+                id: headerTitleRow
                 objectName: "headerTitleRow"
                 anchors.left: parent.left
                 anchors.leftMargin: 32
+                anchors.right: windowControlsRow.left
+                anchors.rightMargin: 12
                 anchors.top: parent.top
                 anchors.topMargin: customTitleBar.headerTopMargin
-                spacing: 12
+                height: 32
+                spacing: 10
 
                 PillButton {
                     id: backToWorkbenchButton
                     objectName: "backToWorkbenchButton"
                     visible: studioBridge.isToolSelected && studioBridge.fileCount > 0
-                    anchors.verticalCenter: parent.verticalCenter
+                    Layout.alignment: Qt.AlignVCenter
                     height: 30
                     horizontalPadding: 14
                     text: "← Volver a la mesa de trabajo"
@@ -195,7 +214,7 @@ Window {
                 Text {
                     id: headerPrimaryTitle
                     objectName: "headerPrimaryTitle"
-                    anchors.verticalCenter: parent.verticalCenter
+                    Layout.alignment: Qt.AlignVCenter
                     text: studioBridge.isToolSelected && studioBridge.fileCount > 0
                           ? studioBridge.activeToolTitle
                           : "Mesa de Trabajo Floral"
@@ -208,7 +227,8 @@ Window {
                 Text {
                     id: headerSubtitleText
                     objectName: "headerSubtitleText"
-                    anchors.baseline: headerPrimaryTitle.baseline
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
                     text: "— " + (studioBridge.isToolSelected && studioBridge.fileCount > 0
                                   ? studioBridge.activeToolSubtitle
                                   : studioBridge.workbenchSubtitle)
@@ -216,11 +236,13 @@ Window {
                     font.italic: true
                     font.pixelSize: 14
                     color: Theme.textSecondary
+                    elide: Text.ElideRight
                 }
             }
 
             // Controles de ventana (minimizar, maximizar, cerrar)
             Row {
+                id: windowControlsRow
                 anchors.right: parent.right
                 anchors.rightMargin: 16
                 anchors.top: parent.top
@@ -438,6 +460,64 @@ Window {
                     }
                 }
             }
+        }
+
+        // Controladores de redimensionamiento de ventana (FramelessWindowHint)
+        MouseArea {
+            id: resizeLeftEdge
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.topMargin: 10
+            anchors.bottomMargin: 10
+            width: 6
+            cursorShape: Qt.SizeHorCursor
+            enabled: rootWindow.visibility !== Window.Maximized
+            onPressed: rootWindow.startSystemResize(Qt.LeftEdge)
+        }
+        MouseArea {
+            id: resizeRightEdge
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.topMargin: 10
+            anchors.bottomMargin: 10
+            width: 6
+            cursorShape: Qt.SizeHorCursor
+            enabled: rootWindow.visibility !== Window.Maximized
+            onPressed: rootWindow.startSystemResize(Qt.RightEdge)
+        }
+        MouseArea {
+            id: resizeBottomEdge
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+            height: 6
+            cursorShape: Qt.SizeVerCursor
+            enabled: rootWindow.visibility !== Window.Maximized
+            onPressed: rootWindow.startSystemResize(Qt.BottomEdge)
+        }
+        MouseArea {
+            id: resizeBottomRightCorner
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            width: 12
+            height: 12
+            cursorShape: Qt.SizeFDiagCursor
+            enabled: rootWindow.visibility !== Window.Maximized
+            onPressed: rootWindow.startSystemResize(Qt.RightEdge | Qt.BottomEdge)
+        }
+        MouseArea {
+            id: resizeBottomLeftCorner
+            anchors.left: parent.left
+            anchors.bottom: parent.bottom
+            width: 12
+            height: 12
+            cursorShape: Qt.SizeBDiagCursor
+            enabled: rootWindow.visibility !== Window.Maximized
+            onPressed: rootWindow.startSystemResize(Qt.LeftEdge | Qt.BottomEdge)
         }
     }
 

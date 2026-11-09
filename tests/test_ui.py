@@ -13,6 +13,8 @@ from ui.theme import (
     BACKGROUND_DARK,
     INITIAL_WINDOW_HEIGHT,
     INITIAL_WINDOW_WIDTH,
+    MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH,
     PRIMARY,
     SECONDARY,
     SIDEBAR_FIXED_WIDTH,
@@ -31,8 +33,10 @@ def test_design_tokens_and_qss_constants() -> None:
     assert PRIMARY == "#DF8293"
     assert SECONDARY == "#681D3A"
     assert ACCENT == "#F8B8B0"
-    assert INITIAL_WINDOW_WIDTH == 1280
-    assert INITIAL_WINDOW_HEIGHT == 720
+    assert INITIAL_WINDOW_WIDTH == 900
+    assert INITIAL_WINDOW_HEIGHT == 640
+    assert MIN_WINDOW_WIDTH == 880
+    assert MIN_WINDOW_HEIGHT == 520
     assert SIDEBAR_FIXED_WIDTH == 260
 
     qss = generate_stationery_qss()
@@ -43,18 +47,19 @@ def test_design_tokens_and_qss_constants() -> None:
 def test_qtquick_window_frameless_full_width_without_sidebar(
     tmp_path: Path, qtbot
 ) -> None:
-    """Verifica que la ventana QtQuick inicie sin barra lateral izquierda y que la Mesa de Trabajo ocupe todo el ancho."""
+    """Verifica que la ventana QtQuick inicie sin barra lateral izquierda, con 900x640 y límites responsivos."""
     store = OperationHistoryStore(storage_path=tmp_path / "ui_hist.json")
     app_wrapper = CoquetteQuickApp(history_store=store)
     window = app_wrapper.load_main_qml()
     assert isinstance(window, QQuickWindow)
 
-    # Verificar FramelessWindowHint y proporción 16:9 (1280x720)
+    # Verificar FramelessWindowHint y dimensiones iniciales y mínimas (900x640, min <= 880x520)
     flags = window.flags()
     assert bool(flags & Qt.WindowType.FramelessWindowHint)
-    assert window.width() == 1280
-    assert window.height() == 720
-    assert round(window.width() / window.height(), 2) == round(16 / 9, 2)
+    assert window.width() == 900
+    assert window.height() == 640
+    assert window.minimumWidth() <= 880
+    assert window.minimumHeight() <= 520
 
     # Verificar que NO exista leftSidebar ni quickSearchInput (Ctrl+K)
     sidebar = window.findChild(QQuickItem, "leftSidebar")
@@ -65,7 +70,7 @@ def test_qtquick_window_frameless_full_width_without_sidebar(
     # Verificar que el Lienzo Central (Mesa de Trabajo) ocupe el 100% del ancho de la ventana
     workspace = window.findChild(QQuickItem, "mainWorkspace")
     assert workspace is not None
-    assert int(workspace.width()) == 1280
+    assert int(workspace.width()) == 900
     assert workspace.property("color").name().upper() == SURFACE_LIGHT
 
     # Verificar que el detalle gráfico de la espiral del cuaderno se conserve en el borde izquierdo
@@ -779,5 +784,69 @@ def test_all_tools_with_options_navigate_to_config_screen_and_do_not_execute_dir
     assert config_panel is not None and config_panel.isVisible() is True
 
     window.close()
+
+
+def test_bloque1_window_900_and_responsive_screens(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Verifica Bloque 1: tamaño inicial 900x640, min 880x520 y adaptabilidad en las 4 pantallas."""
+    store = OperationHistoryStore(storage_path=tmp_path / "b1_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    # 1. Dimensiones iniciales y mínimas
+    assert window.width() == 900
+    assert window.height() == 640
+    assert window.minimumWidth() <= 880
+    assert window.minimumHeight() <= 520
+
+    # 2. Pantalla 1: Mesa vacía
+    empty_container = window.findChild(QQuickItem, "emptyStateContainer")
+    assert empty_container is not None and empty_container.isVisible() is True
+    assert empty_container.width() <= window.width()
+
+    # 3. Pantalla 2: Mesa con archivos (a 900 px y a 880 px)
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    qtbot.wait(QUEUE_EXIT_SETTLE_MS)
+    queued_container = window.findChild(QQuickItem, "queuedStateContainer")
+    assert queued_container is not None and queued_container.isVisible() is True
+    assert queued_container.width() <= window.width()
+
+    footer_bar = window.findChild(QQuickItem, "footerBar")
+    assert footer_bar is not None and footer_bar.width() <= window.width()
+
+    # Probar ancho mínimo 880 px
+    window.setWidth(880)
+    window.setHeight(520)
+    qtbot.wait(50)
+    assert queued_container.width() <= window.width()
+    assert footer_bar.width() <= window.width()
+
+    # 4. Pantalla 3: Organizar Páginas
+    bridge.selectTool("organize")
+    qtbot.wait(50)
+    organizer_view = window.findChild(QQuickItem, "pageOrganizerView")
+    assert organizer_view is not None and organizer_view.isVisible() is True
+    assert organizer_view.width() <= window.width()
+
+    # 5. Pantalla 4: Visor y Firma
+    bridge.selectTool("sign")
+    qtbot.wait(50)
+    viewer_view = window.findChild(QQuickItem, "pdfViewerSignView")
+    assert viewer_view is not None and viewer_view.isVisible() is True
+    assert viewer_view.width() <= window.width()
+
+    # 6. Pantallas de configuración de herramientas (compress, watermark, split)
+    for tool_id in ("compress", "watermark", "split"):
+        bridge.selectTool(tool_id)
+        qtbot.wait(50)
+        config_panel = window.findChild(QQuickItem, "configPanels")
+        assert config_panel is not None and config_panel.isVisible() is True
+        assert config_panel.width() <= window.width()
+
+    window.close()
+
 
 

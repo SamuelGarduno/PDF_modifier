@@ -28,8 +28,10 @@ BUTTON_PRIMARY_ROSE = "#DA7B88"
 QUEUE_CARD_BG = "#FFFDFB"
 
 # Dimensiones arquitectónicas obligatorias
-INITIAL_WINDOW_WIDTH = 1280
-INITIAL_WINDOW_HEIGHT = 720
+INITIAL_WINDOW_WIDTH = 900
+INITIAL_WINDOW_HEIGHT = 640
+MIN_WINDOW_WIDTH = 880
+MIN_WINDOW_HEIGHT = 520
 SIDEBAR_FIXED_WIDTH = 260
 
 # Familias tipográficas con fallbacks seguros
@@ -150,6 +152,14 @@ class ThemePalette(QObject):
     @Property(int, notify=paletteChanged)
     def initialHeight(self) -> int:
         return INITIAL_WINDOW_HEIGHT
+
+    @Property(int, notify=paletteChanged)
+    def minWindowWidth(self) -> int:
+        return MIN_WINDOW_WIDTH
+
+    @Property(int, notify=paletteChanged)
+    def minWindowHeight(self) -> int:
+        return MIN_WINDOW_HEIGHT
 
     @Property(int, notify=paletteChanged)
     def sidebarWidth(self) -> int:

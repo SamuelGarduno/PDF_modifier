@@ -27,75 +27,86 @@ Item {
 
         // Barra de herramientas del visor: paginación, zoom, modo (Desplazar vs. Firmar), sellos ("Sin Sello") y PNG
         Rectangle {
+            id: viewerToolbarBox
             Layout.fillWidth: true
-            Layout.preferredHeight: 44
+            Layout.preferredHeight: toolbarFlow.implicitHeight + 14
             radius: 8
             color: themePalette.surfaceLight
             border.width: 1
             border.color: themePalette.secondary
 
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 10
-                anchors.rightMargin: 10
+            Flow {
+                id: toolbarFlow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 7
                 spacing: 6
 
-                // Paginación
-                Rectangle {
-                    width: 26; height: 26; radius: 6
-                    color: themePalette.accent
-                    border.color: themePalette.secondary
-                    Text { anchors.centerIn: parent; text: "◀"; font.pixelSize: 11; color: themePalette.backgroundDark }
-                    TapHandler { onTapped: studioBridge.setViewerPageIndex(studioBridge.viewerPageIndex - 1) }
+                // 1. Paginación
+                Row {
+                    spacing: 4
+                    Rectangle {
+                        width: 26; height: 26; radius: 6
+                        color: themePalette.accent
+                        border.color: themePalette.secondary
+                        Text { anchors.centerIn: parent; text: "◀"; font.pixelSize: 11; color: themePalette.backgroundDark }
+                        TapHandler { onTapped: studioBridge.setViewerPageIndex(studioBridge.viewerPageIndex - 1) }
+                    }
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Pág. " + (studioBridge.viewerPageIndex + 1) + "/" + Math.max(1, studioBridge.primaryDocumentPageCount)
+                        font.family: themePalette.sansFont
+                        font.pixelSize: 11
+                        font.bold: true
+                        color: themePalette.backgroundDark
+                    }
+
+                    Rectangle {
+                        width: 26; height: 26; radius: 6
+                        color: themePalette.accent
+                        border.color: themePalette.secondary
+                        Text { anchors.centerIn: parent; text: "▶"; font.pixelSize: 11; color: themePalette.backgroundDark }
+                        TapHandler { onTapped: studioBridge.setViewerPageIndex(studioBridge.viewerPageIndex + 1) }
+                    }
                 }
 
-                Text {
-                    text: "Pág. " + (studioBridge.viewerPageIndex + 1) + "/" + Math.max(1, studioBridge.primaryDocumentPageCount)
-                    font.family: themePalette.sansFont
-                    font.pixelSize: 11
-                    font.bold: true
-                    color: themePalette.backgroundDark
+                // 2. Controles de Zoom Fluido
+                Row {
+                    spacing: 4
+                    Rectangle {
+                        width: 26; height: 26; radius: 6
+                        color: themePalette.primary
+                        border.color: themePalette.secondary
+                        Text { anchors.centerIn: parent; text: "−"; font.bold: true; color: themePalette.backgroundDark }
+                        TapHandler { onTapped: studioBridge.setViewerZoom(studioBridge.viewerZoom - 0.15) }
+                    }
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: Math.round(studioBridge.viewerZoom * 100) + "%"
+                        font.family: themePalette.sansFont
+                        font.pixelSize: 11
+                        color: themePalette.secondary
+                    }
+
+                    Rectangle {
+                        width: 26; height: 26; radius: 6
+                        color: themePalette.primary
+                        border.color: themePalette.secondary
+                        Text { anchors.centerIn: parent; text: "+"; font.bold: true; color: themePalette.backgroundDark }
+                        TapHandler { onTapped: studioBridge.setViewerZoom(studioBridge.viewerZoom + 0.15) }
+                    }
                 }
 
-                Rectangle {
-                    width: 26; height: 26; radius: 6
-                    color: themePalette.accent
-                    border.color: themePalette.secondary
-                    Text { anchors.centerIn: parent; text: "▶"; font.pixelSize: 11; color: themePalette.backgroundDark }
-                    TapHandler { onTapped: studioBridge.setViewerPageIndex(studioBridge.viewerPageIndex + 1) }
-                }
-
-                // Controles de Zoom Fluido
-                Rectangle {
-                    width: 26; height: 26; radius: 6
-                    color: themePalette.primary
-                    border.color: themePalette.secondary
-                    Text { anchors.centerIn: parent; text: "−"; font.bold: true; color: themePalette.backgroundDark }
-                    TapHandler { onTapped: studioBridge.setViewerZoom(studioBridge.viewerZoom - 0.15) }
-                }
-
-                Text {
-                    text: Math.round(studioBridge.viewerZoom * 100) + "%"
-                    font.family: themePalette.sansFont
-                    font.pixelSize: 11
-                    color: themePalette.secondary
-                }
-
-                Rectangle {
-                    width: 26; height: 26; radius: 6
-                    color: themePalette.primary
-                    border.color: themePalette.secondary
-                    Text { anchors.centerIn: parent; text: "+"; font.bold: true; color: themePalette.backgroundDark }
-                    TapHandler { onTapped: studioBridge.setViewerZoom(studioBridge.viewerZoom + 0.15) }
-                }
-
-                // Selector de Modo: "Modo Trazar Firma" vs "Modo Mover Documento"
+                // 3. Selector de Modo: "Modo Trazar Firma" vs "Modo Mover Documento"
                 Rectangle {
                     id: modeToggleButton
                     objectName: "viewerModeToggleButton"
-                    Layout.preferredWidth: 148
-                    Layout.preferredHeight: 28
-                    radius: 14
+                    width: 148
+                    height: 26
+                    radius: 13
                     color: studioBridge.viewerDrawMode ? themePalette.secondary : themePalette.accent
                     border.width: 1.2
                     border.color: themePalette.secondary
@@ -114,68 +125,73 @@ Item {
                     }
                 }
 
-                // Selector de Sellos con opción explícita "Sin Sello"
-                Repeater {
-                    model: [
-                        { key: "", label: "SIN SELLO" },
-                        { key: "APROBADO", label: "APROBADO" },
-                        { key: "CONFIDENCIAL", label: "CONFIDENCIAL" },
-                        { key: "REVISADO", label: "REVISADO" }
-                    ]
-                    delegate: Rectangle {
-                        objectName: "stampOption_" + (modelData.key.length > 0 ? modelData.key : "NONE")
-                        Layout.preferredWidth: modelData.key === "CONFIDENCIAL" ? 92 : 76
-                        Layout.preferredHeight: 26
-                        radius: 13
-                        color: studioBridge.signatureStamp === modelData.key
-                               ? themePalette.secondary
-                               : themePalette.surfaceLight
-                        border.width: 1
-                        border.color: themePalette.secondary
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: modelData.label
-                            font.family: themePalette.sansFont
-                            font.pixelSize: 9
-                            font.bold: true
+                // 4. Selector de Sellos con opción explícita "Sin Sello"
+                Row {
+                    spacing: 4
+                    Repeater {
+                        model: [
+                            { key: "", label: "SIN SELLO" },
+                            { key: "APROBADO", label: "APROBADO" },
+                            { key: "CONFIDENCIAL", label: "CONFIDENCIAL" },
+                            { key: "REVISADO", label: "REVISADO" }
+                        ]
+                        delegate: Rectangle {
+                            objectName: "stampOption_" + (modelData.key.length > 0 ? modelData.key : "NONE")
+                            width: modelData.key === "CONFIDENCIAL" ? 88 : 72
+                            height: 26
+                            radius: 13
                             color: studioBridge.signatureStamp === modelData.key
-                                   ? themePalette.surfaceLight
-                                   : themePalette.backgroundDark
-                        }
+                                   ? themePalette.secondary
+                                   : themePalette.surfaceLight
+                            border.width: 1
+                            border.color: themePalette.secondary
 
-                        TapHandler {
-                            onTapped: {
-                                if (modelData.key === "" || studioBridge.signatureStamp === modelData.key) {
-                                    studioBridge.clearSignatureStamp()
-                                } else {
-                                    studioBridge.setSignatureStamp(modelData.key)
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                font.family: themePalette.sansFont
+                                font.pixelSize: 9
+                                font.bold: true
+                                color: studioBridge.signatureStamp === modelData.key
+                                       ? themePalette.surfaceLight
+                                       : themePalette.backgroundDark
+                            }
+
+                            TapHandler {
+                                onTapped: {
+                                    if (modelData.key === "" || studioBridge.signatureStamp === modelData.key) {
+                                        studioBridge.clearSignatureStamp()
+                                    } else {
+                                        studioBridge.setSignatureStamp(modelData.key)
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                Item { Layout.fillWidth: true }
+                // 5. Acciones: Firma PNG y Limpiar Trazo
+                Row {
+                    spacing: 6
+                    PillButton {
+                        height: 26
+                        horizontalPadding: 10
+                        text: "Firma PNG"
+                        primaryStyle: false
+                        onClicked: pngSignatureDialog.open()
+                    }
 
-                PillButton {
-                    height: 28
-                    horizontalPadding: 10
-                    text: "Firma PNG"
-                    primaryStyle: false
-                    onClicked: pngSignatureDialog.open()
-                }
-
-                PillButton {
-                    height: 28
-                    horizontalPadding: 10
-                    text: "Limpiar Trazo"
-                    primaryStyle: false
-                    onClicked: {
-                        viewerRoot.allStrokes = []
-                        viewerRoot.currentStroke = []
-                        signatureCanvas.requestPaint()
-                        studioBridge.clearFreehandStrokes()
+                    PillButton {
+                        height: 26
+                        horizontalPadding: 10
+                        text: "Limpiar Trazo"
+                        primaryStyle: false
+                        onClicked: {
+                            viewerRoot.allStrokes = []
+                            viewerRoot.currentStroke = []
+                            signatureCanvas.requestPaint()
+                            studioBridge.clearFreehandStrokes()
+                        }
                     }
                 }
             }

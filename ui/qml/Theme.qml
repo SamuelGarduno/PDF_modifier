@@ -5,10 +5,10 @@ QtObject {
     id: themeRoot
 
     // Dimensiones de ventana
-    readonly property int initialWidth: 1280
-    readonly property int initialHeight: 720
-    readonly property int minWindowWidth: 960
-    readonly property int minWindowHeight: 600
+    readonly property int initialWidth: 900
+    readonly property int initialHeight: 640
+    readonly property int minWindowWidth: 880
+    readonly property int minWindowHeight: 520
 
     // Paleta Principal "Floral Stationery & Coquette"
     readonly property string surfaceLight: "#FBF0F0"

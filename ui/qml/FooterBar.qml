@@ -35,7 +35,7 @@ Rectangle {
             objectName: "folderPickerSection"
             spacing: 8
             Layout.alignment: Qt.AlignVCenter
-            Layout.maximumWidth: Math.max(300, Math.floor(footerRoot.width * 0.40))
+            Layout.maximumWidth: Math.max(260, Math.floor(footerRoot.width * 0.38))
 
             Text {
                 text: "Guardar en:"
@@ -48,7 +48,7 @@ Rectangle {
             Rectangle {
                 id: outputFolderDisplayBox
                 objectName: "outputFolderDisplayBox"
-                Layout.preferredWidth: Math.max(150, Math.min(240, Math.floor(footerRoot.width * 0.21)))
+                Layout.preferredWidth: Math.max(120, Math.min(220, Math.floor(footerRoot.width * 0.20)))
                 Layout.preferredHeight: 34
                 radius: 8
                 color: studioBridge.isOutputDirectoryValid ? "#FAF3F2" : Theme.errorBg
@@ -205,12 +205,12 @@ Rectangle {
                 objectName: "quickActionsRow"
                 visible: !studioBridge.isBusy && !studioBridge.hasProcessingError && studioBridge.isOutputDirectoryValid && studioBridge.lastOutputFile.length > 0
                 anchors.centerIn: parent
-                spacing: 8
+                spacing: 6
 
                 Rectangle {
                     objectName: "originalIntactBadge"
                     height: 28
-                    width: intactText.implicitWidth + 18
+                    width: intactText.implicitWidth + 16
                     radius: 14
                     color: "#EDF5EE"
                     border.width: 1
@@ -221,15 +221,15 @@ Rectangle {
                         anchors.centerIn: parent
                         text: "Original intacto ✓"
                         font.family: Theme.sansFont
-                        font.pixelSize: 12
+                        font.pixelSize: 11
                         color: "#2F5233"
                     }
                 }
 
                 PillButton {
                     objectName: "footerOpenFileBtn"
-                    height: 32
-                    horizontalPadding: 14
+                    height: 30
+                    horizontalPadding: 12
                     text: "Abrir archivo"
                     primaryStyle: false
                     solidShadow: false
@@ -238,8 +238,8 @@ Rectangle {
 
                 PillButton {
                     objectName: "footerShowFolderBtn"
-                    height: 32
-                    horizontalPadding: 14
+                    height: 30
+                    horizontalPadding: 12
                     text: "Mostrar en carpeta"
                     primaryStyle: false
                     solidShadow: false
