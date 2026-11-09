@@ -902,5 +902,87 @@ def test_bloque2_paper_background_continuity_across_screens(
     window.close()
 
 
+def test_bloque3_queue_entry_exit_and_clear_animations(
+    sample_pdf_5p: Path, sample_pdf_3p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Verifica Bloque 3: entrada (fade+slide 20px+scale 0.96->1.0 en 220ms, stagger 50ms), salida 160ms y vaciado."""
+    import pymupdf as fitz
+
+    pdf_extra = tmp_path / "extra_b3.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 100), "Extra B3")
+    doc.save(pdf_extra)
+    doc.close()
+
+    store = OperationHistoryStore(storage_path=tmp_path / "b3_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    dropzone = window.findChild(QQuickItem, "dropzoneView")
+    assert dropzone is not None
+
+    # 1. Agregar 3 archivos a la vez -> stagger 0, 50, 100 ms; dur 220 ms; offset 20 px; scaleFrom 0.96
+    bridge.addFileUrls([str(sample_pdf_5p), str(sample_pdf_3p), str(pdf_extra)])
+    qtbot.wait(25)
+
+    cards = _collect_items_by_prefix(window.contentItem(), "queuedFileCard_")
+    assert len(cards) == 3
+    for idx, card in enumerate(sorted(cards, key=lambda c: c.property("rowIndex"))):
+        entry = card.property("fileEntry")
+        assert int(entry.property("enterDuration")) == 220
+        assert int(entry.property("enterOffset")) == 20
+        assert abs(float(entry.property("enterScaleFrom")) - 0.96) < 1e-4
+        assert int(entry.property("enterDelay")) == idx * 50
+
+    # La tercera tarjeta (delay=100ms) sigue en estado inicial de entrada a los 25ms
+    card_2 = [c for c in cards if c.property("rowIndex") == 2][0]
+    assert card_2.opacity() < 1.0
+    assert card_2.scale() < 1.0
+
+    # Al terminar la entrada (220ms + 100ms stagger), todas quedan en reposo (opacity=1, scale=1)
+    qtbot.wait(380)
+    for card in _collect_items_by_prefix(window.contentItem(), "queuedFileCard_"):
+        assert abs(card.opacity() - 1.0) < 1e-3
+        assert abs(card.scale() - 1.0) < 1e-3
+
+    # 2. Quitar el primer archivo -> salida de 160ms y reacomodo de las inferiores en 180ms
+    bridge.removeFileAt(0)
+    qtbot.wait(240)
+    remaining_cards = [
+        c for c in _collect_items_by_prefix(window.contentItem(), "queuedFileCard_")
+        if c.property("rowIndex") >= 0
+    ]
+    assert len(remaining_cards) == 2
+
+    # 3. Vaciar cola -> activa queueExitInProgress durante 160ms y luego pasa al estado vacío
+    bridge.clearFiles()
+    assert dropzone.property("queueExitInProgress") is True
+    assert dropzone.property("showQueuedState") is True
+    qtbot.wait(220)
+    assert dropzone.property("queueExitInProgress") is False
+    assert dropzone.property("showQueuedState") is False
+
+    # 4. Lote masivo (>10 archivos) -> fade grupal de 120ms sin escalonado ni slide ni escala
+    bulk_paths = []
+    for i in range(12):
+        p = tmp_path / f"bulk_{i}.pdf"
+        p.write_bytes(pdf_extra.read_bytes())
+        bulk_paths.append(str(p))
+    bridge.addFileUrls(bulk_paths)
+    qtbot.wait(200)
+    bulk_cards = _collect_items_by_prefix(window.contentItem(), "queuedFileCard_")
+    assert len(bulk_cards) > 0
+    first_bulk_entry = bulk_cards[0].property("fileEntry")
+    assert int(first_bulk_entry.property("enterDuration")) == 120
+    assert int(first_bulk_entry.property("enterOffset")) == 0
+    assert int(first_bulk_entry.property("enterDelay")) == 0
+    assert abs(float(first_bulk_entry.property("enterScaleFrom")) - 1.0) < 1e-4
+
+    window.close()
+
+
+
 
 

@@ -98,17 +98,21 @@ QtObject {
     readonly property int animFastMs: 100
     readonly property int animFast: 100
     readonly property int animQuick: 100
-    readonly property int animBase: 160
+    readonly property int animBase: 220
+    readonly property int animEnter: 220
+    readonly property int animBulkFade: 120
     readonly property int animNormalMs: 160
     readonly property int animNormal: 160
     readonly property int animSlow: 220
-    readonly property int animExit: 120
-    readonly property int animDisplace: 140
-    readonly property int animStagger: 40
+    readonly property int animExit: 160
+    readonly property int animDisplace: 180
+    readonly property int animStagger: 50
     readonly property int animStaggerMaxItems: 5
     // Por encima de este lote se omite el escalonado para no trabar equipos modestos
     readonly property int animBulkThreshold: 10
-    readonly property int animEnterOffset: 8
+    readonly property int animEnterOffset: 20
+    readonly property real animEnterScaleFrom: 0.96
+    readonly property int animExitOffset: 12
     readonly property int animEasing: Easing.OutCubic
     readonly property real chipHoverScale: 1.05
 

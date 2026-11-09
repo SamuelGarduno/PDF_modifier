@@ -37,7 +37,7 @@ Item {
         property var seenPaths: ({})
         property double batchStartMs: 0
 
-        function entryFrom(source, enterDelay, enterDuration, enterOffset) {
+        function entryFrom(source, enterDelay, enterDuration, enterOffset, enterScaleFrom) {
             // "index" se omite: el delegado usa el contexto index de ListView
             var entry = {}
             for (var key in source) {
@@ -47,6 +47,7 @@ Item {
             entry.enterDelay = enterDelay
             entry.enterDuration = enterDuration
             entry.enterOffset = enterOffset
+            entry.enterScaleFrom = enterScaleFrom
             return entry
         }
 
@@ -85,8 +86,9 @@ Item {
                     addedCount++
             }
             var isBulk = addedCount > Theme.animBulkThreshold
-            var duration = !ready ? 0 : (isBulk ? Theme.animExit : Theme.animBase)
+            var duration = !ready ? 0 : (isBulk ? Theme.animBulkFade : Theme.animEnter)
             var offset = (!ready || isBulk) ? 0 : Theme.animEnterOffset
+            var scaleFrom = (!ready || isBulk) ? 1.0 : Theme.animEnterScaleFrom
 
             var newIndex = 0
             for (var t = 0; t < source.length; t++) {
@@ -111,7 +113,7 @@ Item {
                                 : (newIndex * Theme.animStagger)
                     if (!ready)
                         seenPaths[src.path] = true
-                    queueModel.insert(t, entryFrom(src, delay, duration, offset))
+                    queueModel.insert(t, entryFrom(src, delay, duration, offset, scaleFrom))
                     newIndex++
                 }
             }
@@ -542,8 +544,14 @@ Item {
                 - (contextualToolsPanel.visible ? contextualToolsPanel.height : 0)
                 - 52
             )
+            property int lastActiveHeight: 88
+            readonly property int targetListHeight: Math.min(Math.max(88, contentHeight), maxAvailableListHeight)
+            onTargetListHeightChanged: {
+                if (queueModel.count > 0)
+                    lastActiveHeight = targetListHeight
+            }
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(Math.max(88, contentHeight), maxAvailableListHeight)
+            Layout.preferredHeight: dropzoneRoot.queueExitInProgress ? lastActiveHeight : targetListHeight
             Layout.maximumHeight: maxAvailableListHeight
             clip: true
             spacing: Theme.cardSpacing
@@ -553,15 +561,22 @@ Item {
             // modelo entero en cada cambio y nunca dispararía las transiciones add/remove.
             model: queueModel
 
-            // Salida: fundido 1 -> 0 en 120 ms (Theme.animExit) y reacomodo de las inferiores en 140 ms.
-            // Se usa NumberAnimation sobre opacity/y de las pocas tarjetas visibles porque ViewTransition
-            // reescribe "y" desde ListView y requiere sincronía por frame en el árbol de ítems.
+            // Salida: fundido 1 -> 0 + desplazamiento lateral de 12 px en 160 ms (Theme.animExit)
+            // y reacomodo de las tarjetas inferiores en 180 ms (Theme.animDisplace).
             remove: Transition {
-                NumberAnimation {
-                    property: "opacity"
-                    to: 0
-                    duration: Theme.animExit
-                    easing.type: Theme.animEasing
+                ParallelAnimation {
+                    NumberAnimation {
+                        property: "opacity"
+                        to: 0
+                        duration: Theme.animExit
+                        easing.type: Theme.animEasing
+                    }
+                    NumberAnimation {
+                        property: "x"
+                        to: Theme.animExitOffset
+                        duration: Theme.animExit
+                        easing.type: Theme.animEasing
+                    }
                 }
             }
 
@@ -596,14 +611,15 @@ Item {
                 width: queueListView.width
                 height: 88
                 activeFocusOnTab: true
+                transformOrigin: Item.Center
 
                 transform: Translate {
                     id: enterSlide
                     y: 0
                 }
 
-                // Entrada individual por tarjeta: permite escalonar 40 ms (máx. 5 tarjetas) sin que
-                // ListView agrupe todas las inserciones del lote en una sola PauseAnimation compartida.
+                // Entrada individual por tarjeta: fade 0 -> 1 + subida de 20 px + escala 0.96 -> 1.0
+                // en 220 ms (Easing.OutCubic), con escalonado de 50 ms (máx. 5 ítems; >10 fade grupal de 120 ms).
                 SequentialAnimation {
                     id: cardEnterAnim
                     PauseAnimation {
@@ -627,10 +643,19 @@ Item {
                             duration: fileEntry.enterDuration
                             easing.type: Theme.animEasing
                         }
+                        NumberAnimation {
+                            target: fileCardFocusScope
+                            property: "scale"
+                            from: fileEntry.enterScaleFrom
+                            to: 1.0
+                            duration: fileEntry.enterDuration
+                            easing.type: Theme.animEasing
+                        }
                     }
                     onStopped: {
                         if (!fileCardFocusScope.isRemoving) {
                             fileCardFocusScope.opacity = 1.0
+                            fileCardFocusScope.scale = 1.0
                             enterSlide.y = 0
                         }
                     }
@@ -639,6 +664,7 @@ Item {
                 onIsRemovingChanged: {
                     if (isRemoving) {
                         cardEnterAnim.stop()
+                        fileCardFocusScope.scale = 1.0
                         enterSlide.y = 0
                     }
                 }
@@ -648,6 +674,7 @@ Item {
                     if (queueSync.ready && withinBatchWindow && !queueSync.seenPaths[fileKey] && fileEntry.enterDuration > 0) {
                         queueSync.seenPaths[fileKey] = true
                         opacity = 0
+                        scale = fileEntry.enterScaleFrom
                         enterSlide.y = fileEntry.enterOffset
                         cardEnterPause.duration = fileEntry.enterDelay
                         cardEnterAnim.start()
