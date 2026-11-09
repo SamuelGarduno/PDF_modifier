@@ -4,6 +4,7 @@ ConfigPanels 1.0 ConfigPanels.qml
 DropzoneView 1.0 DropzoneView.qml
 FooterBar 1.0 FooterBar.qml
 PageOrganizerView 1.0 PageOrganizerView.qml
+PaperBackground 1.0 PaperBackground.qml
 PdfViewerSignView 1.0 PdfViewerSignView.qml
 PillButton 1.0 PillButton.qml
 SidebarCard 1.0 SidebarCard.qml

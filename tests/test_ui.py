@@ -849,4 +849,58 @@ def test_bloque1_window_900_and_responsive_screens(
     window.close()
 
 
+def test_bloque2_paper_background_continuity_across_screens(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Verifica Bloque 2: PaperBackground continuo y marcos transparentes en todas las pantallas."""
+    store = OperationHistoryStore(storage_path=tmp_path / "b2_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    paper_bg = window.findChild(QQuickItem, "mainPaperBackground")
+    assert paper_bg is not None
+    assert paper_bg.property("lineSpacing") == 28
+    assert paper_bg.property("showMarginLine") is True
+    assert paper_bg.property("marginX") == 72
+
+    line_color = paper_bg.property("lineColor")
+    assert 0.05 <= line_color.alphaF() <= 0.09
+
+    outer_frame = window.findChild(QQuickItem, "outerPaperFrame")
+    assert outer_frame is not None
+    assert outer_frame.property("color").alphaF() == 0.0
+
+    # Estado 1: Mesa vacía -> transparente
+    assert bridge.fileCount == 0
+    assert outer_frame.property("color").alphaF() == 0.0
+
+    # Estado 2: Mesa con archivos -> transparente
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    qtbot.wait(QUEUE_EXIT_SETTLE_MS)
+    assert bridge.fileCount == 1
+    assert outer_frame.property("color").alphaF() == 0.0
+
+    # Estado 3: Organizar páginas -> transparente
+    bridge.selectTool("organize")
+    qtbot.wait(50)
+    assert bridge.isToolSelected is True
+    assert outer_frame.property("color").alphaF() == 0.0
+
+    # Estado 4: Visor y firma -> transparente
+    bridge.selectTool("sign")
+    qtbot.wait(50)
+    assert outer_frame.property("color").alphaF() == 0.0
+
+    # Estado 5: Herramientas de configuración -> transparente
+    for tool_id in ("compress", "watermark", "split"):
+        bridge.selectTool(tool_id)
+        qtbot.wait(50)
+        assert outer_frame.property("color").alphaF() == 0.0
+
+    window.close()
+
+
+
 

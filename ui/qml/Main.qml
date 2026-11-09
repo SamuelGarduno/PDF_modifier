@@ -104,25 +104,11 @@ Window {
         anchors.fill: parent
         color: Theme.surfaceLight
 
-        // Renglones horizontales muy sutiles estilo hoja de cuaderno
-        Canvas {
+        // Fondo rayado reutilizable estilo hoja de cuaderno en toda la ventana
+        PaperBackground {
+            id: mainPaperBackground
+            objectName: "mainPaperBackground"
             anchors.fill: parent
-            onPaint: {
-                var ctx = getContext("2d")
-                ctx.reset()
-
-                ctx.strokeStyle = "#E8D2D5"
-                ctx.lineWidth = 1.0
-                ctx.globalAlpha = 0.45
-                for (var lineY = 56; lineY < height; lineY += 24) {
-                    ctx.beginPath()
-                    ctx.moveTo(0, lineY)
-                    ctx.lineTo(width, lineY)
-                    ctx.stroke()
-                }
-            }
-            onWidthChanged: requestPaint()
-            onHeightChanged: requestPaint()
         }
 
         // Detalle gráfico pintado de espiral de libreta en el borde izquierdo del cuaderno
@@ -398,9 +384,7 @@ Window {
                 anchors.bottom: bottomConfigPanel.visible ? bottomConfigPanel.top : bottomFooterBar.top
                 anchors.bottomMargin: 10
                 radius: 14
-                color: (studioBridge.fileCount === 0 || studioBridge.isToolSelected)
-                       ? Theme.stationeryFrameBg
-                       : "transparent"
+                color: "transparent"
                 border.width: (studioBridge.fileCount === 0 || studioBridge.isToolSelected)
                               ? Theme.borderSubtleWidth
                               : 0

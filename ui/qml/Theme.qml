@@ -43,6 +43,12 @@ QtObject {
     readonly property string focusRing: "#681D3A"
     readonly property string focusRingColor: "#681D3A"
 
+    // Fondo rayado de papelería (hoja de libreta floral)
+    readonly property int paperLineSpacing: 28
+    readonly property color paperLineColor: Qt.rgba(0.408, 0.114, 0.227, 0.07)
+    readonly property color paperMarginLineColor: Qt.rgba(0.408, 0.114, 0.227, 0.12)
+    readonly property int paperMarginLeft: 72
+
     // Familias Tipográficas
     readonly property string serifFont: "Georgia"
     readonly property string sansFont: "Segoe UI"
