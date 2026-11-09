@@ -125,6 +125,15 @@ QtObject {
     // Tinte de acento al hover (alfa hex ~20%) mezclado sobre el fondo del chip
     readonly property string chipHoverTintAlpha: "33"
 
+    // Visor y Firma (grosores de trazo en puntos PDF y controles de firma PNG)
+    readonly property real strokeWidthFinePt: 1.75
+    readonly property real strokeWidthMediumPt: 3.0
+    readonly property real strokeWidthBoldPt: 4.5
+    readonly property real pdfReferencePageWidthPt: 595.0
+    readonly property real strokeMinPointDistPx: 1.5
+    readonly property int signatureHandleSize: 14
+    readonly property int signatureDeleteBtnSize: 18
+
     function toolAccentColor(toolId) {
         switch (toolId) {
         case "merge":

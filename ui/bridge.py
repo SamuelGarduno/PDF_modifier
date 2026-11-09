@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -14,11 +15,12 @@ from PySide6.QtCore import (
     Property,
     QObject,
     QSettings,
+    Qt,
     QUrl,
     Signal,
     Slot,
 )
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QImage
 
 from core.exceptions import (
     InvalidPasswordError,
@@ -29,12 +31,14 @@ from core.exceptions import (
 )
 from core.history import OperationHistoryStore
 from core.models import (
+    STROKE_WIDTH_PT_MAP,
     CompressionLevel,
     ImageFormat,
     OperationResult,
     PageItemInstruction,
     QueuedFile,
     SignatureOverlay,
+    StrokeWidthPreset,
     ToolType,
     WatermarkConfig,
     WatermarkPosition,
@@ -179,10 +183,14 @@ class StudioBridge(QObject):
         # Estado del Visor y Capa de Firma
         self._viewer_page_index: int = 0
         self._viewer_zoom: float = 1.0
+        self._viewer_dpr: float = 1.0
         self._viewer_draw_mode: bool = True
+        self._signature_stroke_width_key: str = StrokeWidthPreset.FINE.value
         self._signature_stamp: str = "APROBADO"
         self._signature_image_path: str = ""
         self._freehand_strokes: list[list[tuple[float, float]]] = []
+        self._page_annotations: dict[int, dict[str, Any]] = {}
+        self._primary_doc_key: str = ""
 
         # Estado de los Paneles de Configuración Inferior
         self._range_expr: str = "1-2"
@@ -961,6 +969,10 @@ class StudioBridge(QObject):
         self._queued_files.clear()
         self._organizer_pages.clear()
         self._freehand_strokes.clear()
+        self._page_annotations.clear()
+        self._primary_doc_key = ""
+        self._signature_image_path = ""
+        self._signature_stamp = "APROBADO"
         self.task_manager.thumbnail_cache.clear()
         self._is_tool_selected = False
         self._has_processing_error = False
@@ -983,11 +995,20 @@ class StudioBridge(QObject):
         self._viewer_page_index = 0
         valid_files = self._valid_queued_files()
         if not valid_files:
+            self._page_annotations.clear()
+            self._primary_doc_key = ""
+            self._sync_current_page_viewer_state()
             self.pagesChanged.emit()
             self.viewerChanged.emit()
             return
 
         primary = valid_files[0]
+        new_doc_key = str(primary.file_path.resolve())
+        if new_doc_key != self._primary_doc_key:
+            self._primary_doc_key = new_doc_key
+            self._page_annotations.clear()
+        self._sync_current_page_viewer_state()
+
         if primary.page_count < 1 or primary.file_path.suffix.lower() != ".pdf":
             self.pagesChanged.emit()
             self.viewerChanged.emit()
@@ -1115,6 +1136,49 @@ class StudioBridge(QObject):
 
     # --- Visor PDF y Capa de Firma/Sellos ---
 
+    def _get_page_annotation(self, page_index: int) -> dict[str, Any]:
+        """Obtiene o inicializa el estado de anotaciones (trazos, sello, firma PNG) por página."""
+        if page_index not in self._page_annotations:
+            self._page_annotations[page_index] = {
+                "strokes": [],
+                "stamp": "APROBADO" if page_index == 0 else "",
+                "stamp_rect": (0.60, 0.78, 0.92, 0.92),
+                "image_path": "",
+                "image_rect": (0.375, 0.42, 0.625, 0.56),
+                "image_aspect": 2.2,
+            }
+        return self._page_annotations[page_index]
+
+    def _sync_current_page_viewer_state(self) -> None:
+        """Sincroniza los atributos rápidos de la página activa con el estado por página."""
+        ann = self._get_page_annotation(self._viewer_page_index)
+        self._signature_stamp = str(ann["stamp"])
+        self._signature_image_path = str(ann["image_path"])
+        self._freehand_strokes = [list(s["points"]) for s in ann["strokes"]]
+
+    def _current_page_aspect_ratio(self) -> float:
+        """Devuelve la relación de aspecto visual (ancho/alto) de la página actual del PDF primario."""
+        valid_files = self._valid_queued_files()
+        if not valid_files:
+            return 595.0 / 842.0
+        primary = valid_files[0]
+        if primary.file_path.suffix.lower() != ".pdf" or primary.page_count < 1:
+            return 595.0 / 842.0
+        try:
+            import pymupdf as fitz
+
+            pwd = self._passwords.get(primary.file_path.resolve())
+            with fitz.open(primary.file_path) as doc:
+                if doc.needs_pass and pwd:
+                    doc.authenticate(pwd)
+                idx = max(0, min(doc.page_count - 1, self._viewer_page_index))
+                rect = doc[idx].rect
+                if rect.width > 1 and rect.height > 1:
+                    return float(rect.width) / float(rect.height)
+        except Exception:
+            pass
+        return 595.0 / 842.0
+
     @Property(bool, notify=viewerChanged)
     def viewerDrawMode(self) -> bool:
         return self._viewer_draw_mode
@@ -1123,6 +1187,26 @@ class StudioBridge(QObject):
     def setViewerDrawMode(self, enabled: bool) -> None:
         if enabled != self._viewer_draw_mode:
             self._viewer_draw_mode = enabled
+            self.viewerChanged.emit()
+
+    @Property(str, notify=viewerChanged)
+    def signatureStrokeWidthKey(self) -> str:
+        return self._signature_stroke_width_key
+
+    @Property(float, notify=viewerChanged)
+    def signatureStrokeWidthPt(self) -> float:
+        return float(
+            STROKE_WIDTH_PT_MAP.get(
+                self._signature_stroke_width_key,
+                STROKE_WIDTH_PT_MAP[StrokeWidthPreset.FINE.value],
+            )
+        )
+
+    @Slot(str)
+    def setSignatureStrokeWidthKey(self, key: str) -> None:
+        clean_key = key.strip().lower()
+        if clean_key in STROKE_WIDTH_PT_MAP and clean_key != self._signature_stroke_width_key:
+            self._signature_stroke_width_key = clean_key
             self.viewerChanged.emit()
 
     @Property(int, notify=viewerChanged)
@@ -1134,6 +1218,7 @@ class StudioBridge(QObject):
         max_p = self.primaryDocumentPageCount
         if 0 <= index < max(1, max_p) and index != self._viewer_page_index:
             self._viewer_page_index = index
+            self._sync_current_page_viewer_state()
             self.viewerChanged.emit()
 
     @Property(int, notify=filesChanged)
@@ -1153,6 +1238,17 @@ class StudioBridge(QObject):
             self._viewer_zoom = clamped
             self.viewerChanged.emit()
 
+    @Property(float, notify=viewerChanged)
+    def viewerDevicePixelRatio(self) -> float:
+        return self._viewer_dpr
+
+    @Slot(float)
+    def setViewerDevicePixelRatio(self, dpr: float) -> None:
+        clamped = round(max(1.0, min(3.0, float(dpr))), 2)
+        if clamped != self._viewer_dpr:
+            self._viewer_dpr = clamped
+            self.viewerChanged.emit()
+
     @Property(str, notify=viewerChanged)
     def currentViewerPageUrl(self) -> str:
         if not self._queued_files:
@@ -1161,16 +1257,31 @@ class StudioBridge(QObject):
         if primary.file_path.suffix.lower() != ".pdf" or primary.page_count < 1:
             return ""
         encoded = quote(str(primary.file_path.resolve()))
-        return f"image://pdfpage/{self._viewer_page_index}?path={encoded}&dpi=150"
+        real_dpi = max(72, min(360, int(round(144.0 * self._viewer_zoom * self._viewer_dpr))))
+        return f"image://pdfpage/{self._viewer_page_index}?path={encoded}&dpi={real_dpi}"
+
+    @Property(str, notify=viewerChanged)
+    def initialSignatureDialogFolderUrl(self) -> str:
+        """Carpeta inicial razonable para el FileDialog de Firma PNG."""
+        if self._queued_files:
+            parent = self._queued_files[0].file_path.parent
+            if parent.exists():
+                return QUrl.fromLocalFile(str(parent.resolve())).toString()
+        if self._output_directory and Path(self._output_directory).exists():
+            return QUrl.fromLocalFile(str(Path(self._output_directory).resolve())).toString()
+        return QUrl.fromLocalFile(str(Path.home())).toString()
 
     @Property(str, notify=viewerChanged)
     def signatureStamp(self) -> str:
-        return self._signature_stamp
+        ann = self._get_page_annotation(self._viewer_page_index)
+        return str(ann["stamp"])
 
     @Slot(str)
     def setSignatureStamp(self, label: str) -> None:
         cleaned = "" if label.strip().upper() in {"", "SIN SELLO", "NINGUNO"} else label.strip()
-        if cleaned != self._signature_stamp:
+        ann = self._get_page_annotation(self._viewer_page_index)
+        if cleaned != ann["stamp"] or cleaned != self._signature_stamp:
+            ann["stamp"] = cleaned
             self._signature_stamp = cleaned
             self.viewerChanged.emit()
 
@@ -1179,23 +1290,195 @@ class StudioBridge(QObject):
         """Desactiva y oculta cualquier sello predefinido dejando solo la firma."""
         self.setSignatureStamp("")
 
+    @Property("QVariantMap", notify=viewerChanged)
+    def signatureStampRect(self) -> dict[str, float]:
+        ann = self._get_page_annotation(self._viewer_page_index)
+        x0, y0, x1, y1 = ann["stamp_rect"]
+        return {
+            "x": float(x0),
+            "y": float(y0),
+            "width": float(max(0.05, x1 - x0)),
+            "height": float(max(0.04, y1 - y0)),
+        }
+
+    @Slot(float, float, float, float)
+    def setSignatureStampRect(self, x: float, y: float, width: float, height: float) -> None:
+        w = max(0.08, min(0.95, float(width)))
+        h = max(0.04, min(0.60, float(height)))
+        x0 = max(0.0, min(1.0 - w, float(x)))
+        y0 = max(0.0, min(1.0 - h, float(y)))
+        ann = self._get_page_annotation(self._viewer_page_index)
+        new_rect = (round(x0, 4), round(y0, 4), round(x0 + w, 4), round(y0 + h, 4))
+        if new_rect != ann["stamp_rect"]:
+            ann["stamp_rect"] = new_rect
+            self.viewerChanged.emit()
+
     @Property(str, notify=viewerChanged)
     def signatureImagePath(self) -> str:
-        return self._signature_image_path
+        ann = self._get_page_annotation(self._viewer_page_index)
+        return str(ann["image_path"])
+
+    @Property(str, notify=viewerChanged)
+    def signatureImageUrl(self) -> str:
+        img_p = self.signatureImagePath
+        if not img_p:
+            return ""
+        return QUrl.fromLocalFile(str(Path(img_p).resolve())).toString()
+
+    @Property("QVariantMap", notify=viewerChanged)
+    def signatureImageRect(self) -> dict[str, float]:
+        ann = self._get_page_annotation(self._viewer_page_index)
+        x0, y0, x1, y1 = ann["image_rect"]
+        return {
+            "x": float(x0),
+            "y": float(y0),
+            "width": float(max(0.04, x1 - x0)),
+            "height": float(max(0.02, y1 - y0)),
+            "aspect": float(ann.get("image_aspect", 2.2)),
+        }
+
+    @Slot(float, float, float, float)
+    def setSignatureImageRect(
+        self, x: float, y: float, width: float, height: float
+    ) -> None:
+        """Actualiza la posición o tamaño normalizados (0..1) de la firma PNG en la página actual."""
+        w = max(0.05, min(0.95, float(width)))
+        h = max(0.02, min(0.95, float(height)))
+        x0 = max(0.0, min(1.0 - w, float(x)))
+        y0 = max(0.0, min(1.0 - h, float(y)))
+        ann = self._get_page_annotation(self._viewer_page_index)
+        new_rect = (round(x0, 4), round(y0, 4), round(x0 + w, 4), round(y0 + h, 4))
+        if new_rect != ann["image_rect"]:
+            ann["image_rect"] = new_rect
+            self.viewerChanged.emit()
+
+    @Slot()
+    def clearSignatureImage(self) -> None:
+        """Quita la imagen PNG de firma de la página actual."""
+        ann = self._get_page_annotation(self._viewer_page_index)
+        if ann["image_path"] or self._signature_image_path:
+            ann["image_path"] = ""
+            self._signature_image_path = ""
+            self.viewerChanged.emit()
 
     @Slot(str)
     def setSignatureImagePath(self, path_or_url: str) -> None:
-        if path_or_url.startswith("file:///"):
-            clean = QUrl(path_or_url).toLocalFile()
+        """Valida, escala si es necesario y coloca una imagen PNG transparente en la página actual."""
+        if not path_or_url or not str(path_or_url).strip():
+            # Cancelar el diálogo no debe producir ningún error ni cambiar el estado.
+            return
+
+        raw = str(path_or_url)
+        if raw.lstrip().startswith("file:"):
+            clean = QUrl(raw.strip()).toLocalFile()
         else:
-            clean = path_or_url
-        if clean != self._signature_image_path:
-            self._signature_image_path = clean
-            self.viewerChanged.emit()
+            clean = raw.strip()
+
+        if not clean:
+            return
+
+        img_path = Path(clean)
+        if not img_path.exists() or not img_path.is_file():
+            self._emit_error(f"No se encontró el archivo de imagen: '{img_path.name}'.")
+            return
+
+        ext = img_path.suffix.lower()
+        if ext != ".png":
+            self._emit_error(
+                f"Formato no soportado ('{ext or 'sin extensión'}'). Por favor elige una imagen PNG."
+            )
+            return
+
+        try:
+            file_size = img_path.stat().st_size
+        except OSError:
+            self._emit_error(f"No se pudo leer el archivo PNG '{img_path.name}'.")
+            return
+
+        if file_size == 0:
+            self._emit_error(f"El archivo PNG '{img_path.name}' está vacío (0 bytes).")
+            return
+
+        qimg = QImage(str(img_path))
+        if qimg.isNull() or qimg.width() < 1 or qimg.height() < 1:
+            self._emit_error(
+                f"El archivo PNG '{img_path.name}' está dañado o no es una imagen válida."
+            )
+            return
+
+        rgba_img = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
+        alpha_view = memoryview(rgba_img.constBits())[3::4]
+        if not any(alpha_view):
+            self._emit_error(
+                f"La imagen PNG '{img_path.name}' es 100% transparente y no contiene trazos visibles."
+            )
+            return
+
+        effective_path = img_path
+        orig_w = qimg.width()
+        orig_h = qimg.height()
+
+        if orig_w > 4000 or orig_h > 4000 or file_size > 10 * 1024 * 1024:
+            scaled_qimg = qimg.scaled(
+                2400,
+                2400,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            temp_dir = Path(tempfile.gettempdir()) / "coquette_pdf_signatures"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            scaled_dest = temp_dir / f"sig_scaled_{img_path.stem}_{orig_w}x{orig_h}.png"
+            if scaled_qimg.save(str(scaled_dest), "PNG"):
+                effective_path = scaled_dest
+                orig_w = scaled_qimg.width()
+                orig_h = scaled_qimg.height()
+            self._emit_notice(
+                f"Imagen PNG grande ({qimg.width()}×{qimg.height()} px) escalada automáticamente para mantener fluidez.",
+                is_error=False,
+            )
+
+        img_aspect = float(orig_w) / float(max(1, orig_h))
+        page_aspect = self._current_page_aspect_ratio()
+
+        # Ancho inicial ~25% del ancho de página manteniendo la proporción real del PNG
+        norm_w = 0.25
+        norm_h = (norm_w * page_aspect) / max(0.05, img_aspect)
+        if norm_h > 0.50:
+            norm_h = 0.50
+            norm_w = min(0.80, (norm_h * img_aspect) / max(0.05, page_aspect))
+        elif norm_h < 0.03:
+            norm_h = 0.03
+
+        x0 = round(max(0.0, min(1.0 - norm_w, 0.5 - norm_w / 2.0)), 4)
+        y0 = round(max(0.0, min(1.0 - norm_h, 0.5 - norm_h / 2.0)), 4)
+        x1 = round(min(1.0, x0 + norm_w), 4)
+        y1 = round(min(1.0, y0 + norm_h), 4)
+
+        ann = self._get_page_annotation(self._viewer_page_index)
+        ann["image_path"] = str(effective_path)
+        ann["image_rect"] = (x0, y0, x1, y1)
+        ann["image_aspect"] = round(img_aspect, 4)
+        self._signature_image_path = str(effective_path)
+        self.viewerChanged.emit()
+
+    @Property("QVariantList", notify=viewerChanged)
+    def currentPageStrokes(self) -> list[dict[str, Any]]:
+        """Devuelve los trazos vectoriales registrados en la página activa con su grosor."""
+        ann = self._get_page_annotation(self._viewer_page_index)
+        result: list[dict[str, Any]] = []
+        for s in ann["strokes"]:
+            result.append(
+                {
+                    "points": [{"x": float(px), "y": float(py)} for px, py in s["points"]],
+                    "widthPt": float(s["widthPt"]),
+                    "widthKey": str(s["widthKey"]),
+                }
+            )
+        return result
 
     @Slot("QVariantList")
     def addFreehandStroke(self, normalized_points: list[Any]) -> None:
-        """Registra un trazo libre de firma (lista de puntos {x, y} normalizados 0..1)."""
+        """Registra un trazo libre de firma (lista de puntos {x, y} normalizados 0..1) en la página activa."""
         stroke: list[tuple[float, float]] = []
         for pt in normalized_points:
             if isinstance(pt, dict) and "x" in pt and "y" in pt:
@@ -1203,17 +1486,28 @@ class StudioBridge(QObject):
             elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
                 stroke.append((float(pt[0]), float(pt[1])))
         if len(stroke) >= 2:
-            self._freehand_strokes.append(stroke)
+            ann = self._get_page_annotation(self._viewer_page_index)
+            ann["strokes"].append(
+                {
+                    "points": stroke,
+                    "widthPt": self.signatureStrokeWidthPt,
+                    "widthKey": self._signature_stroke_width_key,
+                }
+            )
+            self._sync_current_page_viewer_state()
             self.viewerChanged.emit()
 
     @Slot()
     def clearFreehandStrokes(self) -> None:
-        self._freehand_strokes.clear()
+        ann = self._get_page_annotation(self._viewer_page_index)
+        ann["strokes"].clear()
+        self._sync_current_page_viewer_state()
         self.viewerChanged.emit()
 
     @Property(int, notify=viewerChanged)
     def freehandStrokeCount(self) -> int:
-        return len(self._freehand_strokes)
+        ann = self._get_page_annotation(self._viewer_page_index)
+        return len(ann["strokes"])
 
     # --- Propiedades de Paneles de Configuración Inferior ---
 
@@ -1816,18 +2110,48 @@ class StudioBridge(QObject):
             out_dir / f"{target_pdf.stem}_firmado.pdf",
             "_firmado",
         )
-        img_p = Path(self._signature_image_path) if self._signature_image_path else None
-        overlay = SignatureOverlay(
-            page_index=self._viewer_page_index,
-            stamp_label=self._signature_stamp if self._signature_stamp else None,
-            image_path=img_p,
-            freehand_strokes=list(self._freehand_strokes),
-        )
+        # Asegurar que la página actual esté inicializada en _page_annotations
+        self._get_page_annotation(self._viewer_page_index)
+        overlays: list[SignatureOverlay] = []
+        for p_idx in sorted(self._page_annotations.keys()):
+            ann = self._page_annotations[p_idx]
+            has_strokes = bool(ann["strokes"])
+            has_stamp = bool(ann["stamp"])
+            has_image = bool(ann["image_path"])
+            if not (has_strokes or has_stamp or has_image):
+                continue
+            img_p = Path(ann["image_path"]) if has_image else None
+            overlays.append(
+                SignatureOverlay(
+                    page_index=p_idx,
+                    normalized_rect=ann["stamp_rect"],
+                    stamp_label=str(ann["stamp"]) if has_stamp else None,
+                    image_path=img_p,
+                    image_normalized_rect=ann["image_rect"] if has_image else None,
+                    freehand_strokes=[list(s["points"]) for s in ann["strokes"]],
+                    stroke_widths_pt=[float(s["widthPt"]) for s in ann["strokes"]],
+                    default_stroke_width_pt=self.signatureStrokeWidthPt,
+                )
+            )
+        if not overlays:
+            ann = self._get_page_annotation(self._viewer_page_index)
+            overlays.append(
+                SignatureOverlay(
+                    page_index=self._viewer_page_index,
+                    normalized_rect=ann["stamp_rect"],
+                    stamp_label=str(ann["stamp"]) if ann["stamp"] else None,
+                    image_path=Path(ann["image_path"]) if ann["image_path"] else None,
+                    image_normalized_rect=ann["image_rect"] if ann["image_path"] else None,
+                    freehand_strokes=[list(s["points"]) for s in ann["strokes"]],
+                    stroke_widths_pt=[float(s["widthPt"]) for s in ann["strokes"]],
+                    default_stroke_width_pt=self.signatureStrokeWidthPt,
+                )
+            )
         return PDFOperationWorker(
             PDFEngine.apply_signature_or_stamp,
             target_pdf,
             dest,
-            overlay,
+            overlays,
             password=primary_pwd,
         )
 

@@ -983,6 +983,192 @@ def test_bloque3_queue_entry_exit_and_clear_animations(
     window.close()
 
 
+def test_bloque4_viewer_zoom_stroke_widths_and_png_signature_edge_cases(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Verifica el Bloque 4 completo (4a y 4b): zoom 50/100/200%, 3 grosores, Firma PNG con casos borde, persistencia por página y guardado."""
+    import pymupdf as fitz
+    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+
+    store = OperationHistoryStore(storage_path=tmp_path / "b4_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.setOutputDirectory(str(tmp_path))
+    bridge.selectTool("sign")
+    qtbot.wait(60)
+
+    viewer_view = window.findChild(QQuickItem, "pdfViewerSignView")
+    sig_canvas = window.findChild(QQuickItem, "signatureCanvas")
+    png_box = window.findChild(QQuickItem, "pngSignatureBox")
+    assert viewer_view is not None and sig_canvas is not None and png_box is not None
+
+    # 1. Antialiasing y smooth activados en el Canvas
+    assert sig_canvas.antialiasing() is True
+    assert sig_canvas.smooth() is True
+
+    # 2. Probar el visor a 50%, 100% y 200% de zoom con DPI dinámico (zoom * devicePixelRatio)
+    bridge.setViewerDevicePixelRatio(1.25)
+    for zoom_val in (0.5, 1.0, 2.0):
+        bridge.setViewerZoom(zoom_val)
+        qtbot.wait(30)
+        expected_dpi = max(72, min(360, int(round(144.0 * zoom_val * 1.25))))
+        assert f"dpi={expected_dpi}" in bridge.currentViewerPageUrl
+    bridge.setViewerZoom(1.0)
+
+    # 3. 3 grosores de trazo (Fino predeterminado, Medio, Grueso)
+    assert bridge.signatureStrokeWidthKey == "fine"
+    assert abs(bridge.signatureStrokeWidthPt - 1.75) < 1e-4
+
+    stroke_btns = _collect_items_by_prefix(window.contentItem(), "strokeWidthOption_")
+    assert len(stroke_btns) == 3
+
+    bridge.setSignatureStrokeWidthKey("medium")
+    assert bridge.signatureStrokeWidthKey == "medium"
+    assert abs(bridge.signatureStrokeWidthPt - 3.0) < 1e-4
+    bridge.setSignatureStrokeWidthKey("bold")
+    assert bridge.signatureStrokeWidthKey == "bold"
+    assert abs(bridge.signatureStrokeWidthPt - 4.5) < 1e-4
+    bridge.setSignatureStrokeWidthKey("fine")
+
+    # 4. Casos borde de Firma PNG:
+    # 4.1 Cancelar el diálogo ("") -> no da error ni cambia estado
+    bridge.clearNoticeMessage()
+    bridge.setSignatureImagePath("")
+    assert bridge.lastNoticeMessage == ""
+    assert bridge.signatureImagePath == ""
+
+    # 4.2 Extensión no soportada (.webp)
+    webp_file = tmp_path / "sello.webp"
+    webp_file.write_bytes(b"RIFFxxxxWEBPVP8 ")
+    bridge.setSignatureImagePath(str(webp_file))
+    assert bridge.lastNoticeIsError is True
+    assert "PNG" in bridge.lastNoticeMessage
+    assert bridge.signatureImagePath == ""
+
+    # 4.3 PNG de 0 bytes
+    zero_png = tmp_path / "vacio.png"
+    zero_png.write_bytes(b"")
+    bridge.setSignatureImagePath(str(zero_png))
+    assert bridge.lastNoticeIsError is True
+    assert "vacío" in bridge.lastNoticeMessage
+
+    # 4.4 PNG corrupto
+    corrupt_png = tmp_path / "corrupto.png"
+    corrupt_png.write_bytes(b"\x89PNG\r\n\x1a\ndatos_corruptos_invalidos")
+    bridge.setSignatureImagePath(str(corrupt_png))
+    assert bridge.lastNoticeIsError is True
+    assert "dañado" in bridge.lastNoticeMessage or "válida" in bridge.lastNoticeMessage
+
+    # 4.5 PNG 100% transparente
+    trans_png = tmp_path / "transparente_100.png"
+    t_img = QImage(160, 80, QImage.Format.Format_ARGB32)
+    t_img.fill(Qt.GlobalColor.transparent)
+    t_img.save(str(trans_png), "PNG")
+    bridge.setSignatureImagePath(str(trans_png))
+    assert bridge.lastNoticeIsError is True
+    assert "transparente" in bridge.lastNoticeMessage
+
+    # 4.6 PNG válido con fondo transparente y ruta con espacios, tildes y eñes (vía URL file:///)
+    special_dir = tmp_path / "Rincón de María Ñañez — Papelería 2026"
+    special_dir.mkdir(parents=True, exist_ok=True)
+    valid_png = special_dir / "rúbrica oficial niña áéíóú.png"
+    v_img = QImage(300, 120, QImage.Format.Format_ARGB32)
+    v_img.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(v_img)
+    pen = QPen(QColor(10, 10, 20, 255))
+    pen.setWidth(10)
+    painter.setPen(pen)
+    painter.drawLine(25, 60, 275, 60)
+    painter.end()
+    v_img.save(str(valid_png), "PNG")
+
+    file_url = QUrl.fromLocalFile(str(valid_png)).toString()
+    bridge.setSignatureImagePath(file_url)
+    qtbot.wait(40)
+
+    assert Path(bridge.signatureImagePath) == valid_png
+    assert png_box.isVisible() is True
+    # Ancho inicial ~25% del ancho de página, centrado y respetando proporción (300/120 = 2.5)
+    rect_p0 = bridge.signatureImageRect
+    assert abs(rect_p0["width"] - 0.25) < 0.02
+    assert abs(rect_p0["x"] - 0.375) < 0.02
+    assert abs(rect_p0["aspect"] - 2.5) < 0.05
+
+    # Mover y redimensionar la firma PNG en la página 1 (índice 0) y añadir trazo vectorial
+    bridge.setSignatureImageRect(0.52, 0.62, 0.30, 0.12)
+    bridge.addFreehandStroke(
+        [{"x": 0.15, "y": 0.22}, {"x": 0.25, "y": 0.18}, {"x": 0.35, "y": 0.24}]
+    )
+    assert bridge.freehandStrokeCount == 1
+
+    # 5. Cambiar a la página 2 (índice 1), añadir un trazo grueso y una imagen enorme (>4000 px)
+    bridge.setViewerPageIndex(1)
+    qtbot.wait(30)
+    assert bridge.viewerPageIndex == 1
+    assert bridge.freehandStrokeCount == 0
+    assert bridge.signatureImagePath == ""
+
+    bridge.setSignatureStrokeWidthKey("bold")
+    bridge.addFreehandStroke(
+        [{"x": 0.20, "y": 0.50}, {"x": 0.40, "y": 0.52}, {"x": 0.60, "y": 0.48}]
+    )
+    assert bridge.freehandStrokeCount == 1
+
+    huge_png = tmp_path / "firma_gigante_4200px.png"
+    h_img = QImage(4200, 1000, QImage.Format.Format_ARGB32)
+    h_img.fill(Qt.GlobalColor.transparent)
+    hp = QPainter(h_img)
+    hpen = QPen(QColor(0, 0, 0, 255))
+    hpen.setWidth(24)
+    hp.setPen(hpen)
+    hp.drawLine(200, 500, 4000, 500)
+    hp.end()
+    h_img.save(str(huge_png), "PNG")
+
+    bridge.setSignatureImagePath(str(huge_png))
+    qtbot.wait(40)
+    assert bridge.signatureImagePath != ""
+    scaled_loaded = QImage(bridge.signatureImagePath)
+    assert not scaled_loaded.isNull()
+    assert scaled_loaded.width() <= 2400
+
+    # Quitar la firma PNG de la página 2 con el botón ✕ (clearSignatureImage)
+    bridge.clearSignatureImage()
+    assert bridge.signatureImagePath == ""
+
+    # Volver a la página 1 (índice 0) y comprobar que tanto la firma PNG como el trazo siguen en su sitio exacto
+    bridge.setViewerPageIndex(0)
+    qtbot.wait(30)
+    assert Path(bridge.signatureImagePath) == valid_png
+    assert bridge.freehandStrokeCount == 1
+    assert abs(bridge.signatureImageRect["x"] - 0.52) < 1e-3
+    assert abs(bridge.signatureImageRect["y"] - 0.62) < 1e-3
+
+    # 6. Guardar el PDF firmado y verificar que ambas páginas editadas (pág 1 y pág 2) cambiaron sus píxeles
+    orig_bytes = sample_pdf_5p.read_bytes()
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as sig_blocker:
+        bridge.executeActiveOperation()
+
+    signed_out = Path(sig_blocker.args[1])
+    assert signed_out.exists()
+    assert signed_out != sample_pdf_5p
+    assert sample_pdf_5p.read_bytes() == orig_bytes
+
+    with fitz.open(sample_pdf_5p) as orig_doc, fitz.open(signed_out) as new_doc:
+        for p_idx in (0, 1):
+            p_before = orig_doc[p_idx].get_pixmap(dpi=110, alpha=False)
+            p_after = new_doc[p_idx].get_pixmap(dpi=110, alpha=False)
+            assert bytes(p_before.samples) != bytes(p_after.samples)
+
+    window.close()
+
+
+
 
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import io
+import math
 import os
 from pathlib import Path
 import shutil
@@ -882,13 +883,172 @@ class PDFEngine:
         )
 
     @staticmethod
+    def _filter_stroke_points(
+        stroke: list[tuple[float, float]],
+        page_width_pt: float,
+        page_height_pt: float,
+        min_dist_pt: float = 1.2,
+    ) -> list[tuple[float, float]]:
+        """Descarta puntos intermedios a menos de ~1.5 px/pt para suavizar el trazo."""
+        if len(stroke) <= 2:
+            return list(stroke)
+        filtered: list[tuple[float, float]] = [stroke[0]]
+        for pt in stroke[1:-1]:
+            last = filtered[-1]
+            dx = (pt[0] - last[0]) * page_width_pt
+            dy = (pt[1] - last[1]) * page_height_pt
+            if math.hypot(dx, dy) >= min_dist_pt:
+                filtered.append(pt)
+        filtered.append(stroke[-1])
+        return filtered
+
+    @staticmethod
+    def _visual_point_to_shape(page: fitz.Page, nx: float, ny: float) -> fitz.Point:
+        """Mapea un punto normalizado (0..1) visual al espacio de page.new_shape() respetando /Rotate y CropBox."""
+        r = page.rect
+        vx = r.x0 + nx * r.width
+        vy = r.y0 + ny * r.height
+        pt = fitz.Point(vx, vy) * page.derotation_matrix
+        if page.rotation % 360 != 0:
+            cb = page.cropbox
+            mb = page.mediabox
+            pt = fitz.Point(pt.x + cb.x0, pt.y - (mb.y1 - cb.y1))
+        return pt
+
+    @staticmethod
+    def _visual_rect_to_unrotated(
+        page: fitz.Page, norm_rect: tuple[float, float, float, float]
+    ) -> fitz.Rect:
+        """Mapea un rectángulo normalizado (0..1) visual a fitz.Rect no rotado respetando /Rotate y CropBox."""
+        r = page.rect
+        nx0, ny0, nx1, ny1 = norm_rect
+        vis_rect = fitz.Rect(
+            r.x0 + nx0 * r.width,
+            r.y0 + ny0 * r.height,
+            r.x0 + nx1 * r.width,
+            r.y0 + ny1 * r.height,
+        )
+        unrot_rect = (vis_rect * page.derotation_matrix).normalize()
+        if page.rotation % 360 != 0:
+            cb = page.cropbox
+            mb = page.mediabox
+            dx = cb.x0
+            dy = -(mb.y1 - cb.y1)
+            unrot_rect = fitz.Rect(
+                unrot_rect.x0 + dx,
+                unrot_rect.y0 + dy,
+                unrot_rect.x1 + dx,
+                unrot_rect.y1 + dy,
+            )
+        return unrot_rect
+
+    @staticmethod
+    def _draw_vector_strokes_on_page(
+        page: fitz.Page, overlay: SignatureOverlay
+    ) -> None:
+        """Escribe los trazos libres en el PDF como curvas vectoriales Bézier reales con extremos redondeados."""
+        if not overlay.freehand_strokes:
+            return
+        vis_w = max(1.0, page.rect.width)
+        vis_h = max(1.0, page.rect.height)
+
+        for idx, raw_stroke in enumerate(overlay.freehand_strokes):
+            pts = PDFEngine._filter_stroke_points(raw_stroke, vis_w, vis_h)
+            if len(pts) < 2:
+                continue
+
+            shape_pts = [
+                PDFEngine._visual_point_to_shape(page, p[0], p[1]) for p in pts
+            ]
+            shape = page.new_shape()
+            if len(shape_pts) == 2:
+                shape.draw_line(shape_pts[0], shape_pts[1])
+            else:
+                mid_first = fitz.Point(
+                    (shape_pts[0].x + shape_pts[1].x) * 0.5,
+                    (shape_pts[0].y + shape_pts[1].y) * 0.5,
+                )
+                shape.draw_line(shape_pts[0], mid_first)
+                cur = mid_first
+                for i in range(1, len(shape_pts) - 1):
+                    ctrl = shape_pts[i]
+                    nxt = shape_pts[i + 1]
+                    mid = fitz.Point((ctrl.x + nxt.x) * 0.5, (ctrl.y + nxt.y) * 0.5)
+                    # Elevación exacta de grado cuadrático (cur, ctrl, mid) a cúbico (cur, cp1, cp2, mid)
+                    cp1 = fitz.Point(
+                        cur.x + (2.0 / 3.0) * (ctrl.x - cur.x),
+                        cur.y + (2.0 / 3.0) * (ctrl.y - cur.y),
+                    )
+                    cp2 = fitz.Point(
+                        mid.x + (2.0 / 3.0) * (ctrl.x - mid.x),
+                        mid.y + (2.0 / 3.0) * (ctrl.y - mid.y),
+                    )
+                    shape.draw_bezier(cur, cp1, cp2, mid)
+                    cur = mid
+                shape.draw_line(cur, shape_pts[-1])
+
+            base_pt = (
+                overlay.stroke_widths_pt[idx]
+                if idx < len(overlay.stroke_widths_pt)
+                else overlay.default_stroke_width_pt
+            )
+            width_pt = max(1.4, float(base_pt) * (vis_w / 595.0))
+            shape.finish(
+                color=(0.0, 0.0, 0.0),
+                width=width_pt,
+                lineCap=1,
+                lineJoin=1,
+            )
+            shape.commit(overlay=True)
+
+    @staticmethod
+    def _insert_signature_png_on_page(
+        page: fitz.Page, overlay: SignatureOverlay
+    ) -> None:
+        """Incrusta la firma PNG con canal alfa transparente en el rectángulo normalizado exacto."""
+        if overlay.image_path is None or not Path(overlay.image_path).exists():
+            return
+        ext_img = QImage(str(overlay.image_path))
+        if ext_img.isNull():
+            return
+
+        ext_img = ext_img.convertToFormat(QImage.Format.Format_ARGB32)
+        max_dim = max(ext_img.width(), ext_img.height())
+        if max_dim > 2400:
+            ext_img = ext_img.scaled(
+                2400,
+                2400,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        ext_img.save(buf, "PNG")
+        png_stream = bytes(buf.data())
+
+        target_norm = (
+            overlay.image_normalized_rect
+            if overlay.image_normalized_rect is not None
+            else overlay.normalized_rect
+        )
+        unrot_rect = PDFEngine._visual_rect_to_unrotated(page, target_norm)
+        page.insert_image(
+            unrot_rect,
+            stream=png_stream,
+            rotate=page.rotation,
+            keep_proportion=True,
+            overlay=True,
+        )
+
+    @staticmethod
     def render_signature_overlay_png(
         overlay: SignatureOverlay,
         page_width_pt: float,
         page_height_pt: float,
         scale: float = 2.0,
     ) -> bytes:
-        """Genera una imagen PNG RGBA 100% transparente (alpha=0) con trazos negros (#000000) y sello opcional al derecho."""
+        """Genera una imagen PNG RGBA 100% transparente (alpha=0) con trazos negros (#000000) y sello opcional."""
         from PySide6.QtWidgets import QApplication
 
         if QApplication.instance() is None:
@@ -916,14 +1076,23 @@ class PDFEngine:
         if overlay.image_path is not None and Path(overlay.image_path).exists():
             ext_img = QImage(str(overlay.image_path))
             if not ext_img.isNull():
+                ix0, iy0, ix1, iy1 = (
+                    overlay.image_normalized_rect
+                    if overlay.image_normalized_rect is not None
+                    else overlay.normalized_rect
+                )
+                irx = ix0 * w_px
+                iry = iy0 * h_px
+                irw = max(16.0, (ix1 - ix0) * w_px)
+                irh = max(16.0, (iy1 - iy0) * h_px)
                 scaled_ext = ext_img.scaled(
-                    int(rw),
-                    int(rh),
+                    int(irw),
+                    int(irh),
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                dx = rx + (rw - scaled_ext.width()) / 2.0
-                dy = ry + (rh - scaled_ext.height()) / 2.0
+                dx = irx + (irw - scaled_ext.width()) / 2.0
+                dy = iry + (irh - scaled_ext.height()) / 2.0
                 painter.drawImage(QPointF(dx, dy), scaled_ext)
 
         # 2. Sello predefinido opcional (sin fondo rosado opaco ni borde rectangular que recorte)
@@ -948,22 +1117,40 @@ class PDFEngine:
                 stamp_text,
             )
 
-        # 3. Trazos libres de firma manuscrita en negro puro (#000000)
+        # 3. Trazos libres de firma manuscrita en negro puro (#000000) con curvas cuadráticas Bézier
         if overlay.freehand_strokes:
-            pen = QPen(QColor(0, 0, 0, 255))
-            pen.setWidthF(max(3.6, w_px * 0.0055))
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
+            for idx, raw_stroke in enumerate(overlay.freehand_strokes):
+                pts = PDFEngine._filter_stroke_points(
+                    raw_stroke, page_width_pt, page_height_pt
+                )
+                if len(pts) < 2:
+                    continue
+                base_pt = (
+                    overlay.stroke_widths_pt[idx]
+                    if idx < len(overlay.stroke_widths_pt)
+                    else overlay.default_stroke_width_pt
+                )
+                pen = QPen(QColor(0, 0, 0, 255))
+                pen.setWidthF(max(2.4 * scale, (float(base_pt) / 595.0) * w_px))
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(pen)
 
-            for stroke in overlay.freehand_strokes:
-                if len(stroke) >= 2:
-                    path = QPainterPath()
-                    path.moveTo(stroke[0][0] * w_px, stroke[0][1] * h_px)
-                    for pt in stroke[1:]:
-                        path.lineTo(pt[0] * w_px, pt[1] * h_px)
-                    painter.drawPath(path)
+                path = QPainterPath()
+                p0x, p0y = pts[0][0] * w_px, pts[0][1] * h_px
+                path.moveTo(p0x, p0y)
+                if len(pts) == 2:
+                    path.lineTo(pts[1][0] * w_px, pts[1][1] * h_px)
+                else:
+                    p1x, p1y = pts[1][0] * w_px, pts[1][1] * h_px
+                    path.lineTo((p0x + p1x) * 0.5, (p0y + p1y) * 0.5)
+                    for i in range(1, len(pts) - 1):
+                        cx, cy = pts[i][0] * w_px, pts[i][1] * h_px
+                        nx, ny = pts[i + 1][0] * w_px, pts[i + 1][1] * h_px
+                        path.quadTo(cx, cy, (cx + nx) * 0.5, (cy + ny) * 0.5)
+                    path.lineTo(pts[-1][0] * w_px, pts[-1][1] * h_px)
+                painter.drawPath(path)
 
         painter.end()
 
@@ -973,21 +1160,62 @@ class PDFEngine:
         return bytes(buf.data())
 
     @staticmethod
+    def _verify_saved_signatures_in_pdf(
+        original_path: Path,
+        saved_path: Path,
+        overlays: list[SignatureOverlay],
+        password: str | None = None,
+    ) -> None:
+        """Reabre el PDF guardado, renderiza cada página modificada y confirma que la firma/trazo aparece donde se esperaba."""
+        orig_doc = fitz.open(original_path)
+        saved_doc = fitz.open(saved_path)
+        try:
+            if orig_doc.needs_pass and password:
+                orig_doc.authenticate(password)
+            if saved_doc.needs_pass and password:
+                saved_doc.authenticate(password)
+
+            for ov in overlays:
+                has_strokes = any(len(s) >= 2 for s in ov.freehand_strokes)
+                has_stamp = bool(ov.stamp_label and ov.stamp_label.strip())
+                has_image = bool(
+                    ov.image_path is not None and Path(ov.image_path).exists()
+                )
+                if not (has_strokes or has_stamp or has_image):
+                    continue
+
+                p_orig = orig_doc.load_page(ov.page_index)
+                p_saved = saved_doc.load_page(ov.page_index)
+                pix_orig = p_orig.get_pixmap(dpi=96, alpha=False)
+                pix_saved = p_saved.get_pixmap(dpi=96, alpha=False)
+                if pix_orig.samples == pix_saved.samples:
+                    raise PDFStudioError(
+                        f"La verificación post-guardado detectó que la página {ov.page_index + 1} no reflejó la firma."
+                    )
+        finally:
+            orig_doc.close()
+            saved_doc.close()
+
+    @staticmethod
     def apply_signature_or_stamp(
         input_file: Path,
         output_path: Path,
-        overlay: SignatureOverlay,
+        overlay: SignatureOverlay | list[SignatureOverlay],
         password: str | None = None,
         on_progress: ProgressCallback | None = None,
         is_cancelled: CancelCheckCallback | None = None,
     ) -> OperationResult:
-        """Estampa trazos libres de firma (#000000), sello opcional o imagen PNG con fondo 100% transparente y orientación exacta."""
+        """Estampa trazos libres vectoriales (#000000), firma PNG con transparencia y/o sello en una o varias páginas."""
         path = Path(input_file)
         info = inspect_pdf_file(path, password=password)
         if info.is_encrypted and not password:
             raise PDFEncryptedError(
                 f"El archivo '{path.name}' está protegido con contraseña."
             )
+
+        overlays: list[SignatureOverlay] = (
+            list(overlay) if isinstance(overlay, list) else [overlay]
+        )
 
         safe_dest = ensure_safe_output_path(
             path, output_path, default_suffix="_firmado"
@@ -1003,45 +1231,74 @@ class PDFEngine:
             if doc.needs_pass and password:
                 doc.authenticate(password)
 
-            if overlay.page_index < 0 or overlay.page_index >= doc.page_count:
-                raise PDFStudioError(
-                    f"Índice de página inválido para firma: {overlay.page_index}"
-                )
+            for ov in overlays:
+                if ov.page_index < 0 or ov.page_index >= doc.page_count:
+                    raise PDFStudioError(
+                        f"Índice de página inválido para firma: {ov.page_index}"
+                    )
 
             _check_cancel(is_cancelled)
-            page = doc.load_page(overlay.page_index)
-            # Aislar el estado gráfico CTM existente (evita inversión vertical de streams no envueltos)
-            page.wrap_contents()
+            _emit_progress(
+                on_progress, 45, "Superponiendo firma vectorial y elementos en página..."
+            )
 
-            visual_rect = page.rect
-            _emit_progress(on_progress, 45, "Superponiendo firma/sello transparente en página...")
+            for ov in overlays:
+                _check_cancel(is_cancelled)
+                page = doc.load_page(ov.page_index)
+                # Aislar el estado gráfico CTM existente (evita inversión vertical de streams no envueltos)
+                page.wrap_contents()
+                visual_rect = page.rect
 
-            has_strokes = bool(overlay.freehand_strokes)
-            has_stamp = bool(overlay.stamp_label and overlay.stamp_label.strip())
-            has_image = bool(overlay.image_path is not None and Path(overlay.image_path).exists())
-
-            if has_strokes or has_stamp or has_image:
-                overlay_png = PDFEngine.render_signature_overlay_png(
-                    overlay=overlay,
-                    page_width_pt=visual_rect.width,
-                    page_height_pt=visual_rect.height,
-                    scale=2.0,
+                has_strokes = any(len(s) >= 2 for s in ov.freehand_strokes)
+                has_stamp = bool(ov.stamp_label and ov.stamp_label.strip())
+                has_image = bool(
+                    ov.image_path is not None and Path(ov.image_path).exists()
                 )
-                unrotated_rect = (visual_rect * page.derotation_matrix).normalize()
-                page.insert_image(
-                    unrotated_rect,
-                    stream=overlay_png,
-                    rotate=page.rotation,
-                    keep_proportion=False,
-                    overlay=True,
-                )
+
+                # 1. Sello predefinido opcional (transparente a alta resolución >= 216 DPI)
+                if has_stamp:
+                    stamp_only = SignatureOverlay(
+                        page_index=ov.page_index,
+                        stamp_label=ov.stamp_label,
+                        image_path=None,
+                        freehand_strokes=[],
+                        normalized_rect=ov.normalized_rect,
+                    )
+                    stamp_png = PDFEngine.render_signature_overlay_png(
+                        overlay=stamp_only,
+                        page_width_pt=visual_rect.width,
+                        page_height_pt=visual_rect.height,
+                        scale=3.0,
+                    )
+                    unrot_full = PDFEngine._visual_rect_to_unrotated(
+                        page, (0.0, 0.0, 1.0, 1.0)
+                    )
+                    page.insert_image(
+                        unrot_full,
+                        stream=stamp_png,
+                        rotate=page.rotation,
+                        keep_proportion=False,
+                        overlay=True,
+                    )
+
+                # 2. Imagen PNG de firma en su posición y proporción elegidas
+                if has_image:
+                    PDFEngine._insert_signature_png_on_page(page, ov)
+
+                # 3. Trazos libres escritos como vectores reales en el PDF
+                if has_strokes:
+                    PDFEngine._draw_vector_strokes_on_page(page, ov)
 
             doc.save(str(tmp_path), deflate=True)
             doc.close()
             _check_cancel(is_cancelled)
             shutil.move(str(tmp_path), str(safe_dest))
+            PDFEngine._verify_saved_signatures_in_pdf(
+                path, safe_dest, overlays, password=password
+            )
         except Exception:
-            doc.close()
+            if not doc.is_closed:
+                doc.close()
             tmp_path.unlink(missing_ok=True)
             raise
 

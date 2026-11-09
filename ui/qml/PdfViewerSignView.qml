@@ -2,21 +2,81 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import QtQuick.Window
 
 Item {
     id: viewerRoot
     objectName: "pdfViewerSignView"
     property var currentStroke: []
-    property var allStrokes: []
+    property var allStrokes: studioBridge ? studioBridge.currentPageStrokes : []
     property string strokeHexColor: "#000000"
+
+    function syncDpr() {
+        if (studioBridge && Screen.devicePixelRatio > 0) {
+            studioBridge.setViewerDevicePixelRatio(Screen.devicePixelRatio)
+        }
+    }
+
+    function drawSmoothStroke(ctx, pts, widthPt) {
+        if (!pts || pts.length < 2) {
+            return
+        }
+        var w = Math.max(1, signatureCanvas.width)
+        var h = Math.max(1, signatureCanvas.height)
+        var effPt = (widthPt !== undefined && widthPt > 0)
+                    ? widthPt
+                    : (studioBridge ? studioBridge.signatureStrokeWidthPt : Theme.strokeWidthFinePt)
+        ctx.lineWidth = Math.max(1.0, (effPt / Theme.pdfReferencePageWidthPt) * w)
+        ctx.lineCap = "round"
+        ctx.lineJoin = "round"
+        ctx.beginPath()
+
+        var p0x = pts[0].x * w
+        var p0y = pts[0].y * h
+        ctx.moveTo(p0x, p0y)
+
+        if (pts.length === 2) {
+            ctx.lineTo(pts[1].x * w, pts[1].y * h)
+        } else {
+            for (var i = 1; i < pts.length - 1; i++) {
+                var cx = pts[i].x * w
+                var cy = pts[i].y * h
+                var nx = pts[i + 1].x * w
+                var ny = pts[i + 1].y * h
+                var midX = (cx + nx) * 0.5
+                var midY = (cy + ny) * 0.5
+                ctx.quadraticCurveTo(cx, cy, midX, midY)
+            }
+            var last = pts[pts.length - 1]
+            ctx.lineTo(last.x * w, last.y * h)
+        }
+        ctx.stroke()
+    }
+
+    Component.onCompleted: {
+        syncDpr()
+        signatureCanvas.requestPaint()
+    }
+
+    Connections {
+        target: studioBridge
+        function onViewerChanged() {
+            viewerRoot.allStrokes = studioBridge.currentPageStrokes
+            signatureCanvas.requestPaint()
+        }
+    }
 
     FileDialog {
         id: pngSignatureDialog
         title: "Seleccionar firma o sello PNG transparente"
         fileMode: FileDialog.OpenFile
+        currentFolder: studioBridge ? studioBridge.initialSignatureDialogFolderUrl : ""
         nameFilters: ["Imágenes PNG (*.png)"]
         onAccepted: {
             studioBridge.setSignatureImagePath(pngSignatureDialog.selectedFile.toString())
+        }
+        onRejected: {
+            // Cancelar el diálogo no produce error ni altera el estado
         }
     }
 
@@ -25,9 +85,10 @@ Item {
         anchors.margins: 10
         spacing: 8
 
-        // Barra de herramientas del visor: paginación, zoom, modo (Desplazar vs. Firmar), sellos ("Sin Sello") y PNG
+        // Barra de herramientas del visor: paginación, zoom, modo, grosor de trazo, sellos y PNG
         Rectangle {
             id: viewerToolbarBox
+            objectName: "viewerToolbarBox"
             Layout.fillWidth: true
             Layout.preferredHeight: toolbarFlow.implicitHeight + 14
             radius: 8
@@ -100,11 +161,11 @@ Item {
                     }
                 }
 
-                // 3. Selector de Modo: "Modo Trazar Firma" vs "Modo Mover Documento"
+                // 3. Selector de Modo: "Modo Trazar Firma" vs "Modo Mover Hoja"
                 Rectangle {
                     id: modeToggleButton
                     objectName: "viewerModeToggleButton"
-                    width: 148
+                    width: 144
                     height: 26
                     radius: 13
                     color: studioBridge.viewerDrawMode ? themePalette.secondary : themePalette.accent
@@ -125,7 +186,53 @@ Item {
                     }
                 }
 
-                // 4. Selector de Sellos con opción explícita "Sin Sello"
+                // 4. Selector de Grosor de Trazo: Fino (predeterminado), Medio, Grueso
+                Row {
+                    spacing: 4
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Trazo:"
+                        font.family: themePalette.sansFont
+                        font.pixelSize: 10
+                        font.bold: true
+                        color: themePalette.secondary
+                    }
+                    Repeater {
+                        model: [
+                            { key: "fine", label: "Fino" },
+                            { key: "medium", label: "Medio" },
+                            { key: "bold", label: "Grueso" }
+                        ]
+                        delegate: Rectangle {
+                            objectName: "strokeWidthOption_" + modelData.key
+                            width: 48
+                            height: 26
+                            radius: 13
+                            color: studioBridge.signatureStrokeWidthKey === modelData.key
+                                   ? themePalette.secondary
+                                   : themePalette.surfaceLight
+                            border.width: 1
+                            border.color: themePalette.secondary
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                font.family: themePalette.sansFont
+                                font.pixelSize: 10
+                                font.bold: true
+                                color: studioBridge.signatureStrokeWidthKey === modelData.key
+                                       ? themePalette.surfaceLight
+                                       : themePalette.backgroundDark
+                            }
+
+                            TapHandler {
+                                onTapped: studioBridge.setSignatureStrokeWidthKey(modelData.key)
+                            }
+                        }
+                    }
+                }
+
+                // 5. Selector de Sellos con opción explícita "Sin Sello"
                 Row {
                     spacing: 4
                     Repeater {
@@ -137,7 +244,7 @@ Item {
                         ]
                         delegate: Rectangle {
                             objectName: "stampOption_" + (modelData.key.length > 0 ? modelData.key : "NONE")
-                            width: modelData.key === "CONFIDENCIAL" ? 88 : 72
+                            width: modelData.key === "CONFIDENCIAL" ? 86 : 68
                             height: 26
                             radius: 13
                             color: studioBridge.signatureStamp === modelData.key
@@ -170,10 +277,11 @@ Item {
                     }
                 }
 
-                // 5. Acciones: Firma PNG y Limpiar Trazo
+                // 6. Acciones: Firma PNG y Limpiar Trazo
                 Row {
                     spacing: 6
                     PillButton {
+                        objectName: "pngSignatureButton"
                         height: 26
                         horizontalPadding: 10
                         text: "Firma PNG"
@@ -182,6 +290,7 @@ Item {
                     }
 
                     PillButton {
+                        objectName: "clearStrokesButton"
                         height: 26
                         horizontalPadding: 10
                         text: "Limpiar Trazo"
@@ -197,7 +306,7 @@ Item {
             }
         }
 
-        // Lienzo de inspección con zoom fluido; interactive se bloquea en Modo Trazar Firma
+        // Lienzo de inspección con zoom fluido; interactive se bloquea en Modo Trazar Firma o arrastrando firma PNG
         Flickable {
             id: pageFlickable
             objectName: "viewerFlickable"
@@ -206,7 +315,10 @@ Item {
             contentWidth: Math.max(width, paperSheet.width + 32)
             contentHeight: Math.max(height, paperSheet.height + 32)
             clip: true
-            interactive: !studioBridge.viewerDrawMode && !signatureMouseArea.pressed
+            interactive: !studioBridge.viewerDrawMode
+                         && !signatureMouseArea.pressed
+                         && !pngDragMouseArea.pressed
+                         && !pngResizeMouseArea.pressed
             boundsBehavior: Flickable.StopAtBounds
 
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -227,8 +339,12 @@ Item {
 
                 Image {
                     id: pdfRenderImage
+                    objectName: "viewerPdfRenderImage"
                     anchors.fill: parent
                     fillMode: Image.Stretch
+                    smooth: true
+                    antialiasing: true
+                    mipmap: true
                     asynchronous: true
                     source: studioBridge.currentViewerPageUrl
                 }
@@ -237,11 +353,12 @@ Item {
                 Item {
                     id: stampPreviewBox
                     objectName: "stampPreviewBox"
+                    z: 4
                     visible: studioBridge.signatureStamp.length > 0
-                    width: parent.width * 0.32
-                    height: parent.height * 0.14
-                    x: parent.width * 0.60
-                    y: parent.height * 0.78
+                    width: parent.width * studioBridge.signatureStampRect.width
+                    height: parent.height * studioBridge.signatureStampRect.height
+                    x: parent.width * studioBridge.signatureStampRect.x
+                    y: parent.height * studioBridge.signatureStampRect.y
 
                     Text {
                         anchors.centerIn: parent
@@ -254,7 +371,9 @@ Item {
 
                     // Botón directo para quitar el sello desde la vista previa
                     Rectangle {
-                        width: 18; height: 18; radius: 9
+                        width: Theme.signatureDeleteBtnSize
+                        height: Theme.signatureDeleteBtnSize
+                        radius: Theme.signatureDeleteBtnSize / 2
                         anchors.top: parent.top
                         anchors.right: parent.right
                         color: themePalette.secondary
@@ -269,37 +388,37 @@ Item {
                     }
                 }
 
-                // Capa Canvas interactiva para firma manuscrita a mano alzada en negro puro (#000000)
+                // Capa Canvas interactiva para firma manuscrita a mano alzada con curvas Bézier suaves
                 Canvas {
                     id: signatureCanvas
                     objectName: "signatureCanvas"
+                    z: 2
                     anchors.fill: parent
+                    antialiasing: true
+                    smooth: true
+
+                    onWidthChanged: requestPaint()
+                    onHeightChanged: requestPaint()
+
                     onPaint: {
                         var ctx = getContext("2d")
                         ctx.clearRect(0, 0, width, height)
                         ctx.strokeStyle = viewerRoot.strokeHexColor
-                        ctx.lineWidth = 2.4
-                        ctx.lineCap = "round"
-                        ctx.lineJoin = "round"
 
-                        for (var s = 0; s < viewerRoot.allStrokes.length; s++) {
-                            var stroke = viewerRoot.allStrokes[s]
-                            if (stroke.length < 2) continue
-                            ctx.beginPath()
-                            ctx.moveTo(stroke[0].x * width, stroke[0].y * height)
-                            for (var i = 1; i < stroke.length; i++) {
-                                ctx.lineTo(stroke[i].x * width, stroke[i].y * height)
-                            }
-                            ctx.stroke()
+                        var strokes = viewerRoot.allStrokes || []
+                        for (var s = 0; s < strokes.length; s++) {
+                            var item = strokes[s]
+                            var pts = item && item.points ? item.points : item
+                            var wPt = item && item.widthPt ? item.widthPt : studioBridge.signatureStrokeWidthPt
+                            viewerRoot.drawSmoothStroke(ctx, pts, wPt)
                         }
 
-                        if (viewerRoot.currentStroke.length >= 2) {
-                            ctx.beginPath()
-                            ctx.moveTo(viewerRoot.currentStroke[0].x * width, viewerRoot.currentStroke[0].y * height)
-                            for (var j = 1; j < viewerRoot.currentStroke.length; j++) {
-                                ctx.lineTo(viewerRoot.currentStroke[j].x * width, viewerRoot.currentStroke[j].y * height)
-                            }
-                            ctx.stroke()
+                        if (viewerRoot.currentStroke && viewerRoot.currentStroke.length >= 2) {
+                            viewerRoot.drawSmoothStroke(
+                                ctx,
+                                viewerRoot.currentStroke,
+                                studioBridge.signatureStrokeWidthPt
+                            )
                         }
                     }
 
@@ -313,30 +432,205 @@ Item {
 
                         onPressed: function(mouse) {
                             viewerRoot.currentStroke = [{
-                                x: Math.max(0, Math.min(1, mouse.x / width)),
-                                y: Math.max(0, Math.min(1, mouse.y / height))
+                                x: Math.max(0, Math.min(1, mouse.x / Math.max(1, width))),
+                                y: Math.max(0, Math.min(1, mouse.y / Math.max(1, height)))
                             }]
                         }
                         onPositionChanged: function(mouse) {
-                            if (pressed) {
-                                var pts = viewerRoot.currentStroke
-                                pts.push({
-                                    x: Math.max(0, Math.min(1, mouse.x / width)),
-                                    y: Math.max(0, Math.min(1, mouse.y / height))
-                                })
-                                viewerRoot.currentStroke = pts
-                                signatureCanvas.requestPaint()
+                            if (!pressed) {
+                                return
                             }
+                            var pts = viewerRoot.currentStroke
+                            if (pts.length > 0) {
+                                var lastPt = pts[pts.length - 1]
+                                var dx = mouse.x - (lastPt.x * width)
+                                var dy = mouse.y - (lastPt.y * height)
+                                if (Math.sqrt(dx * dx + dy * dy) < Theme.strokeMinPointDistPx) {
+                                    return
+                                }
+                            }
+                            pts.push({
+                                x: Math.max(0, Math.min(1, mouse.x / Math.max(1, width))),
+                                y: Math.max(0, Math.min(1, mouse.y / Math.max(1, height)))
+                            })
+                            viewerRoot.currentStroke = pts
+                            signatureCanvas.requestPaint()
                         }
-                        onReleased: {
-                            if (viewerRoot.currentStroke.length >= 2) {
-                                var listCopy = viewerRoot.allStrokes
-                                listCopy.push(viewerRoot.currentStroke)
-                                viewerRoot.allStrokes = listCopy
-                                studioBridge.addFreehandStroke(viewerRoot.currentStroke)
+                        onReleased: function(mouse) {
+                            var pts = viewerRoot.currentStroke
+                            if (pts.length === 1) {
+                                var p0 = pts[0]
+                                var dx = mouse.x - (p0.x * width)
+                                var dy = mouse.y - (p0.y * height)
+                                if (Math.sqrt(dx * dx + dy * dy) >= 0.5) {
+                                    pts.push({
+                                        x: Math.max(0, Math.min(1, mouse.x / Math.max(1, width))),
+                                        y: Math.max(0, Math.min(1, mouse.y / Math.max(1, height)))
+                                    })
+                                }
+                            }
+                            if (pts.length >= 2) {
+                                studioBridge.addFreehandStroke(pts)
                             }
                             viewerRoot.currentStroke = []
                             signatureCanvas.requestPaint()
+                        }
+                    }
+                }
+
+                // Caja interactiva para Firma PNG transparente (arrastrable, redimensionable en proporción y eliminable)
+                Item {
+                    id: pngSignatureBox
+                    objectName: "pngSignatureBox"
+                    z: 5
+                    visible: studioBridge.signatureImagePath.length > 0
+                    x: parent.width * studioBridge.signatureImageRect.x
+                    y: parent.height * studioBridge.signatureImageRect.y
+                    width: parent.width * studioBridge.signatureImageRect.width
+                    height: parent.height * studioBridge.signatureImageRect.height
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "transparent"
+                        radius: 4
+                        border.width: Theme.borderSubtleWidth
+                        border.color: Theme.borderSubtleColor
+                    }
+
+                    Image {
+                        id: pngSignatureImage
+                        objectName: "pngSignatureImage"
+                        anchors.fill: parent
+                        anchors.margins: 2
+                        source: studioBridge.signatureImageUrl
+                        fillMode: Image.PreserveAspectFit
+                        smooth: true
+                        antialiasing: true
+                        mipmap: true
+                        asynchronous: false
+                    }
+
+                    // Área para arrastrar la firma PNG dentro de la página
+                    MouseArea {
+                        id: pngDragMouseArea
+                        objectName: "pngDragMouseArea"
+                        anchors.fill: parent
+                        preventStealing: true
+                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.SizeAllCursor
+
+                        property real startMouseX: 0
+                        property real startMouseY: 0
+                        property real startBoxX: 0
+                        property real startBoxY: 0
+
+                        onPressed: function(mouse) {
+                            var ptInSheet = pngDragMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                            startMouseX = ptInSheet.x
+                            startMouseY = ptInSheet.y
+                            startBoxX = pngSignatureBox.x
+                            startBoxY = pngSignatureBox.y
+                        }
+
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || paperSheet.width <= 0 || paperSheet.height <= 0) {
+                                return
+                            }
+                            var ptInSheet = pngDragMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                            var dx = ptInSheet.x - startMouseX
+                            var dy = ptInSheet.y - startMouseY
+                            var newX = Math.max(0, Math.min(paperSheet.width - pngSignatureBox.width, startBoxX + dx))
+                            var newY = Math.max(0, Math.min(paperSheet.height - pngSignatureBox.height, startBoxY + dy))
+                            studioBridge.setSignatureImageRect(
+                                newX / paperSheet.width,
+                                newY / paperSheet.height,
+                                pngSignatureBox.width / paperSheet.width,
+                                pngSignatureBox.height / paperSheet.height
+                            )
+                        }
+                    }
+
+                    // Esquina inferior derecha para cambiar tamaño manteniendo la proporción
+                    Rectangle {
+                        id: pngResizeHandle
+                        objectName: "pngResizeHandle"
+                        z: 2
+                        width: Theme.signatureHandleSize
+                        height: Theme.signatureHandleSize
+                        radius: Theme.signatureHandleSize / 2
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.margins: -5
+                        color: Theme.secondaryWine
+                        border.width: 1
+                        border.color: Theme.surfaceCard
+
+                        MouseArea {
+                            id: pngResizeMouseArea
+                            objectName: "pngResizeMouseArea"
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            preventStealing: true
+                            cursorShape: Qt.SizeFDiagCursor
+
+                            property real startMouseX: 0
+                            property real startWidth: 0
+
+                            onPressed: function(mouse) {
+                                var ptInSheet = pngResizeMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                                startMouseX = ptInSheet.x
+                                startWidth = pngSignatureBox.width
+                            }
+
+                            onPositionChanged: function(mouse) {
+                                if (!pressed || paperSheet.width <= 0 || paperSheet.height <= 0) {
+                                    return
+                                }
+                                var ptInSheet = pngResizeMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                                var dx = ptInSheet.x - startMouseX
+                                var minW = Math.max(32, paperSheet.width * 0.08)
+                                var maxW = Math.max(minW, paperSheet.width - pngSignatureBox.x)
+                                var newW = Math.max(minW, Math.min(maxW, startWidth + dx))
+                                var imgAspect = Math.max(0.1, studioBridge.signatureImageRect.aspect || 2.0)
+                                var newH = newW / imgAspect
+                                if (pngSignatureBox.y + newH > paperSheet.height) {
+                                    newH = Math.max(20, paperSheet.height - pngSignatureBox.y)
+                                    newW = newH * imgAspect
+                                }
+                                studioBridge.setSignatureImageRect(
+                                    pngSignatureBox.x / paperSheet.width,
+                                    pngSignatureBox.y / paperSheet.height,
+                                    newW / paperSheet.width,
+                                    newH / paperSheet.height
+                                )
+                            }
+                        }
+                    }
+
+                    // Botón ✕ para quitar la firma PNG de la página actual
+                    Rectangle {
+                        id: clearPngSignatureBtn
+                        objectName: "clearPngSignatureBtn"
+                        z: 2
+                        width: Theme.signatureDeleteBtnSize
+                        height: Theme.signatureDeleteBtnSize
+                        radius: Theme.signatureDeleteBtnSize / 2
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.margins: -6
+                        color: Theme.secondaryWine
+                        border.width: 1
+                        border.color: Theme.surfaceCard
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "✕"
+                            font.pixelSize: 10
+                            font.bold: true
+                            color: Theme.surfaceLight
+                        }
+
+                        TapHandler {
+                            onTapped: studioBridge.clearSignatureImage()
                         }
                     }
                 }

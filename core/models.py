@@ -83,6 +83,21 @@ class WatermarkConfig:
     color_rgb: tuple[float, float, float] = (0.408, 0.114, 0.227)  # #681D3A
 
 
+class StrokeWidthPreset(StrEnum):
+    """Grosores de trazo libre para firma."""
+
+    FINE = "fine"
+    MEDIUM = "medium"
+    BOLD = "bold"
+
+
+STROKE_WIDTH_PT_MAP: dict[str, float] = {
+    StrokeWidthPreset.FINE.value: 1.75,
+    StrokeWidthPreset.MEDIUM.value: 3.0,
+    StrokeWidthPreset.BOLD.value: 4.5,
+}
+
+
 @dataclass(slots=True)
 class SignatureOverlay:
     """Datos de firma libre, sello predefinido o imagen PNG sobre una página."""
@@ -91,7 +106,10 @@ class SignatureOverlay:
     stamp_label: str | None = None  # Ej. "APROBADO", "CONFIDENCIAL"
     image_path: Path | None = None  # Imagen PNG con transparencia
     freehand_strokes: list[list[tuple[float, float]]] = field(default_factory=list)
+    stroke_widths_pt: list[float] = field(default_factory=list)
+    default_stroke_width_pt: float = 1.75
     normalized_rect: tuple[float, float, float, float] = (0.60, 0.78, 0.92, 0.92)
+    image_normalized_rect: tuple[float, float, float, float] | None = None
 
 
 @dataclass(slots=True)

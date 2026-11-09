@@ -49,7 +49,7 @@ class PDFPageImageProvider(QQuickImageProvider):
             params = parse_qs(parsed.query)
             raw_path = unquote(params.get("path", [""])[0])
             dpi = int(params.get("dpi", [str(DEFAULT_THUMBNAIL_DPI)])[0])
-            dpi = max(48, min(220, dpi))
+            dpi = max(48, min(360, dpi))
 
             if not raw_path:
                 return self._create_placeholder_image("Sin documento")

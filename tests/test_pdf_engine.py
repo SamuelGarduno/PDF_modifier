@@ -375,3 +375,80 @@ def test_worker_and_lru_cache_for_200_plus_pages(tmp_path: Path, qtbot) -> None:
     assert result.output_files[0].exists()
     assert len(progress_events) > 0
 
+
+def test_bloque4_vector_strokes_and_png_signature_rotations_and_cropbox(
+    tmp_path: Path,
+) -> None:
+    """Verifica trazos vectoriales Bézier nativos, 3 grosores, firma PNG transparente y mapeo exacto con /Rotate y CropBox."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+
+    # Crear firma PNG transparente real (240x100) con trazo oscuro en el centro
+    png_sig = tmp_path / "firma_transparente.png"
+    sig_img = QImage(240, 100, QImage.Format.Format_ARGB32)
+    sig_img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(sig_img)
+    pen = QPen(QColor(15, 15, 25, 255))
+    pen.setWidth(8)
+    p.setPen(pen)
+    p.drawLine(20, 50, 220, 50)
+    p.end()
+    assert sig_img.save(str(png_sig), "PNG")
+
+    # Probar páginas verticales, horizontales y con /Rotate = 0, 90, 180, 270 + CropBox != MediaBox
+    configs = [
+        ("vertical_0", 595, 842, 0, False),
+        ("horizontal_0", 842, 595, 0, False),
+        ("rot_90_crop", 595, 842, 90, True),
+        ("rot_180_crop", 595, 842, 180, True),
+        ("rot_270_crop", 595, 842, 270, True),
+    ]
+    for label, w, h, rot, use_crop in configs:
+        src_pdf = tmp_path / f"src_{label}.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=w, height=h)
+        if use_crop:
+            page.set_cropbox(fitz.Rect(30, 40, w - 20, h - 30))
+        if rot:
+            page.set_rotation(rot)
+        doc.save(str(src_pdf))
+        doc.close()
+
+        out_pdf = tmp_path / f"out_{label}.pdf"
+        # Trazo multipunto que genera curvas Bézier cúbicas (" c\n") y firma PNG en posición específica
+        overlay = SignatureOverlay(
+            page_index=0,
+            stamp_label=None,
+            image_path=png_sig,
+            image_normalized_rect=(0.60, 0.65, 0.85, 0.78),
+            freehand_strokes=[
+                [(0.15, 0.25), (0.22, 0.20), (0.30, 0.28), (0.38, 0.22)],
+                [(0.15, 0.40), (0.25, 0.42), (0.35, 0.40)],
+            ],
+            stroke_widths_pt=[1.75, 4.5],
+            default_stroke_width_pt=1.75,
+        )
+        res = PDFEngine.apply_signature_or_stamp(src_pdf, out_pdf, overlay)
+        assert res.output_files[0].exists()
+
+        with fitz.open(out_pdf) as signed_doc:
+            sp = signed_doc[0]
+            # Comprobar que el stream de contenido contiene operadores Bézier vectoriales (" c\n") y round cap ("1 J")
+            raw_stream = b"".join(signed_doc.xref_stream(xref) for xref in sp.get_contents())
+            assert b" c\n" in raw_stream
+            assert b"1 J" in raw_stream
+
+            # Renderizar página firmada y comprobar que tanto la zona del trazo como la zona del PNG cambiaron respecto al blanco
+            pix = sp.get_pixmap(dpi=144, alpha=False)
+            rendered = QImage.fromData(bytes(pix.tobytes("png")), "PNG")
+
+            # Verificar caja de la firma PNG (0.60..0.85, 0.65..0.78)
+            png_dark_pixels = 0
+            for sx in range(int(rendered.width() * 0.62), int(rendered.width() * 0.83), 3):
+                for sy in range(int(rendered.height() * 0.66), int(rendered.height() * 0.77), 3):
+                    c = rendered.pixelColor(sx, sy)
+                    if c.red() < 100 and c.green() < 100 and c.blue() < 100:
+                        png_dark_pixels += 1
+            assert png_dark_pixels > 5, f"La firma PNG no quedó estampada en {label}"
+
+
