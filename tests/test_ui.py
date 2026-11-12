@@ -1168,6 +1168,88 @@ def test_bloque4_viewer_zoom_stroke_widths_and_png_signature_edge_cases(
     window.close()
 
 
+def test_bloque5_ui_dynamic_compression_estimates_and_cache(
+    tmp_path: Path, qtbot
+) -> None:
+    """Verifica en la UI (Bloque 5): porcentajes dinámicos en los botones, caché por archivo, aviso de pliego ligero (<5%) y resultado final 'De X a Y (-Z%)'."""
+    import io
+    import random
+    import pymupdf as fitz
+    from PIL import Image
+
+    # Crear un PDF con imágenes comprimibles y otro de solo texto ligero
+    rng = random.Random(505)
+    raw = bytearray(240 * 320 * 3)
+    for idx in range(0, len(raw), 3):
+        raw[idx] = rng.randint(50, 230)
+        raw[idx + 1] = rng.randint(60, 220)
+        raw[idx + 2] = rng.randint(70, 210)
+    base_img = Image.frombytes("RGB", (240, 320), bytes(raw)).resize(
+        (1400, 1800), Image.Resampling.BICUBIC
+    )
+    jpg_buf = io.BytesIO()
+    base_img.save(jpg_buf, format="JPEG", quality=95)
+
+    img_pdf = tmp_path / "pliego_con_fotos.pdf"
+    doc = fitz.open()
+    for _ in range(3):
+        p = doc.new_page(width=595, height=842)
+        p.insert_image(fitz.Rect(24, 24, 571, 818), stream=jpg_buf.getvalue())
+    doc.save(str(img_pdf), deflate=True)
+    doc.close()
+
+    light_pdf = tmp_path / "pliego_ligero_texto.pdf"
+    doc2 = fitz.open()
+    p2 = doc2.new_page(width=595, height=842)
+    p2.insert_text((72, 100), "Pliego ligero de solo texto.", fontsize=12)
+    doc2.save(str(light_pdf), garbage=4, deflate=True)
+    doc2.close()
+
+    store = OperationHistoryStore(storage_path=tmp_path / "b5_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.setOutputDirectory(str(tmp_path))
+    bridge.addSingleFilePath(str(img_pdf))
+    bridge.selectTool("compress")
+
+    # Esperar a que termine la estimación asíncrona en segundo plano
+    qtbot.waitUntil(lambda: not bridge.isEstimatingCompression, timeout=8000)
+    qtbot.wait(40)
+
+    # Verificar que los botones de nivel en QML muestran los porcentajes dinámicos reales (y no los fijos ~62%, ~38%, ~16%)
+    level_btns = _collect_items_by_prefix(window.contentItem(), "compressLevelBtn_")
+    est_txt = window.findChild(QQuickItem, "compressionEstimateText")
+    assert len(level_btns) == 3 and est_txt is not None
+
+    opts = {opt["key"]: opt["label"] for opt in bridge.compressionLevelOptions}
+    assert "~" in opts["extreme"] and "%" in opts["extreme"]
+    assert "Reducción estimada ~" in bridge.estimatedCompressionSummary
+
+    # Verificar que el resultado quedó guardado en caché por (ruta, mtime, tamaño)
+    assert len(bridge._compression_estimate_cache) == 1
+
+    # Ejecutar la compresión y verificar el mensaje real "De X a Y (-Z%)"
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as blocker:
+        bridge.executeActiveOperation()
+    out_compressed = Path(blocker.args[1])
+    assert out_compressed.exists()
+    assert "De " in bridge.statusMessage and "(-" in bridge.statusMessage
+
+    # Cambiar a un PDF de solo texto (<5% de reducción) y verificar el mensaje honesto
+    bridge.clearFiles()
+    bridge.addSingleFilePath(str(light_pdf))
+    bridge.selectTool("compress")
+    qtbot.waitUntil(lambda: not bridge.isEstimatingCompression, timeout=5000)
+    qtbot.wait(40)
+    assert "Este pliego ya está muy ligero" in bridge.estimatedCompressionSummary
+
+    window.close()
+
+
+
 
 
 

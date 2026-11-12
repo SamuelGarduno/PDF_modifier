@@ -25,6 +25,7 @@ QtObject {
     readonly property string queueCardBg: "#FFFDFB"
     readonly property string surfaceCard: "#FFFDFB"
     readonly property string surfaceCardHover: "#FAF0EE"
+    readonly property string surfaceElevated: "#FAF3F2"
 
     // Textos
     readonly property string textPrimary: "#2D1018"

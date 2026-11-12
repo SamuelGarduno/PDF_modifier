@@ -30,6 +30,58 @@ class CompressionLevel(StrEnum):
     LOW_LOSS = "low_loss"
 
 
+@dataclass(frozen=True, slots=True)
+class CompressionProfile:
+    """Parámetros concretos y monótonos por nivel de compresión."""
+
+    level: CompressionLevel
+    jpeg_quality: int
+    dpi_threshold: float
+    dpi_target: float
+    max_side_px: int
+    garbage: int
+    use_objstms: int
+    strip_metadata: bool
+    strip_xml_metadata: bool
+
+
+COMPRESSION_PROFILES: dict[CompressionLevel, CompressionProfile] = {
+    CompressionLevel.LOW_LOSS: CompressionProfile(
+        level=CompressionLevel.LOW_LOSS,
+        jpeg_quality=85,
+        dpi_threshold=220.0,
+        dpi_target=195.0,
+        max_side_px=4200,
+        garbage=3,
+        use_objstms=0,
+        strip_metadata=False,
+        strip_xml_metadata=False,
+    ),
+    CompressionLevel.RECOMMENDED: CompressionProfile(
+        level=CompressionLevel.RECOMMENDED,
+        jpeg_quality=70,
+        dpi_threshold=155.0,
+        dpi_target=140.0,
+        max_side_px=3000,
+        garbage=4,
+        use_objstms=0,
+        strip_metadata=False,
+        strip_xml_metadata=True,
+    ),
+    CompressionLevel.EXTREME: CompressionProfile(
+        level=CompressionLevel.EXTREME,
+        jpeg_quality=48,
+        dpi_threshold=105.0,
+        dpi_target=96.0,
+        max_side_px=1900,
+        garbage=4,
+        use_objstms=1,
+        strip_metadata=True,
+        strip_xml_metadata=True,
+    ),
+}
+
+
 class ImageFormat(StrEnum):
     """Formatos soportados para exportación de páginas como imagen."""
 

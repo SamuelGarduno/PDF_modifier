@@ -107,12 +107,16 @@ Rectangle {
                 }
 
                 Text {
+                    id: compressionEstimateText
+                    objectName: "compressionEstimateText"
                     text: studioBridge.estimatedCompressionSummary
                     font.family: Theme.scriptFont
                     font.italic: true
                     font.pixelSize: Theme.fontMetaSize
                     color: Theme.textPrimary
                     opacity: Theme.metaOpacity
+                    elide: Text.ElideRight
+                    width: Math.min(implicitWidth, 340)
                 }
             }
 
@@ -120,24 +124,22 @@ Rectangle {
                 spacing: 8
                 Layout.alignment: Qt.AlignVCenter
                 Repeater {
-                    model: [
-                        { key: "extreme", label: "Extrema (~62%)" },
-                        { key: "recommended", label: "Recomendada (~38%)" },
-                        { key: "low_loss", label: "Baja pérdida (~16%)" }
-                    ]
+                    model: studioBridge.compressionLevelOptions
                     delegate: Rectangle {
-                        width: 148
+                        objectName: "compressLevelBtn_" + modelData.key
+                        width: Math.max(136, levelBtnText.implicitWidth + 24)
                         height: 34
                         radius: 17
                         color: studioBridge.compressionLevel === modelData.key
                                ? Theme.secondaryWine
-                               : "#FAF3F2"
+                               : Theme.surfaceElevated
                         border.width: Theme.borderSubtleWidth
                         border.color: studioBridge.compressionLevel === modelData.key
                                       ? Theme.secondaryWine
                                       : Theme.borderSubtleColor
 
                         Text {
+                            id: levelBtnText
                             anchors.centerIn: parent
                             text: modelData.label
                             font.family: Theme.sansFont

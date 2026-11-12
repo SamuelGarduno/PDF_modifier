@@ -452,3 +452,251 @@ def test_bloque4_vector_strokes_and_png_signature_rotations_and_cropbox(
             assert png_dark_pixels > 5, f"La firma PNG no quedó estampada en {label}"
 
 
+def test_bloque5_compression_seven_pdfs_monotonic_and_honest_estimation(
+    tmp_path: Path,
+) -> None:
+    """Verifica el Bloque 5 con los 7 tipos de PDFs exigidos: monotonía, estimación <=5 pts, integridad (texto, TOC, SMask), firma digital y cancelación limpia."""
+    from PIL import Image, ImageDraw
+    from core.exceptions import TaskCancelledError
+    from core.models import COMPRESSION_PROFILES
+
+    # Verificar que los tres perfiles centralizados existen en core/models.py con parámetros diferenciados
+    assert set(COMPRESSION_PROFILES.keys()) == {
+        CompressionLevel.LOW_LOSS,
+        CompressionLevel.RECOMMENDED,
+        CompressionLevel.EXTREME,
+    }
+    assert (
+        COMPRESSION_PROFILES[CompressionLevel.EXTREME].jpeg_quality
+        < COMPRESSION_PROFILES[CompressionLevel.RECOMMENDED].jpeg_quality
+        < COMPRESSION_PROFILES[CompressionLevel.LOW_LOSS].jpeg_quality
+    )
+
+    def _make_photo_bytes(w: int, h: int, seed: int, fmt: str = "JPEG", quality: int = 96) -> bytes:
+        import io
+        import random
+
+        rng = random.Random(seed)
+        # Crear base con ruido de bloque suave escalado + formas geométricas para simular fotografía escaneada realista
+        small_w, small_h = max(32, w // 6), max(32, h // 6)
+        raw = bytearray(small_w * small_h * 3)
+        for idx in range(0, len(raw), 3):
+            raw[idx] = rng.randint(60, 235)
+            raw[idx + 1] = rng.randint(50, 215)
+            raw[idx + 2] = rng.randint(70, 225)
+        small_img = Image.frombytes("RGB", (small_w, small_h), bytes(raw))
+        img = small_img.resize((w, h), Image.Resampling.BICUBIC)
+        draw = ImageDraw.Draw(img)
+        for k in range(18):
+            x0 = (k * 73) % (w - 80)
+            y0 = (k * 59) % (h - 80)
+            draw.rectangle([x0, y0, x0 + 70, y0 + 60], outline=(80, 25, 45), width=3)
+        buf = io.BytesIO()
+        if fmt == "JPEG":
+            img.save(buf, format="JPEG", quality=quality)
+        else:
+            img.save(buf, format=fmt)
+        return buf.getvalue()
+
+    # 1) Escaneo de imágenes de 10 páginas
+    pdf_scan_10p = tmp_path / "1_escaneo_10p.pdf"
+    doc = fitz.open()
+    for i in range(10):
+        p = doc.new_page(width=595, height=842)
+        p.insert_image(fitz.Rect(18, 18, 577, 824), stream=_make_photo_bytes(1650, 2300, 100 + i))
+    doc.save(str(pdf_scan_10p), deflate=True)
+    doc.close()
+
+    # 2) Solo texto vectorial
+    pdf_text_only = tmp_path / "2_solo_texto_vectorial.pdf"
+    doc = fitz.open()
+    for i in range(6):
+        p = doc.new_page(width=595, height=842)
+        for line in range(28):
+            p.insert_text(
+                (54, 60 + line * 24),
+                f"Apuntes de literatura y papelería floral — página {i + 1}, línea {line + 1}",
+                fontsize=11,
+            )
+    doc.save(str(pdf_text_only), garbage=4, deflate=True, clean=True)
+    doc.close()
+
+    # 3) Mixto texto e imágenes (con tabla de contenidos TOC, enlaces y transparencia SMask)
+    pdf_mixed = tmp_path / "3_mixto_texto_imagenes_toc_smask.pdf"
+    doc = fitz.open()
+    for i in range(5):
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((54, 54), f"Capítulo {i + 1}: Herbarios Ilustrados", fontsize=16)
+        p.insert_text((54, 82), "Texto seleccionable que debe conservarse íntegro tras comprimir.", fontsize=11)
+        p.insert_link({"kind": fitz.LINK_URI, "from": fitz.Rect(54, 70, 240, 90), "uri": "https://example.org"})
+        p.insert_image(fitz.Rect(54, 110, 541, 460), stream=_make_photo_bytes(1500, 1100, 300 + i))
+    # Añadir una imagen PNG con canal alfa (SMask) en la página 1
+    import io
+    rgba_img = Image.new("RGBA", (600, 400), (0, 0, 0, 0))
+    rgba_draw = ImageDraw.Draw(rgba_img)
+    rgba_draw.ellipse([40, 40, 560, 360], fill=(223, 130, 147, 190))
+    rgba_buf = io.BytesIO()
+    rgba_img.save(rgba_buf, format="PNG")
+    doc[0].insert_image(fitz.Rect(120, 500, 460, 720), stream=rgba_buf.getvalue())
+    doc.set_toc([[1, "Capítulo 1", 1], [1, "Capítulo 2", 2], [1, "Capítulo 3", 3]])
+    doc.save(str(pdf_mixed), deflate=True)
+    doc.close()
+
+    # 4) Una página con una imagen pesada de ~20 MB (bitmap de alta resolución sin compresión agresiva)
+    pdf_heavy_1p = tmp_path / "4_una_pagina_imagen_20mb.pdf"
+    import os
+    raw_rgb_20mb = os.urandom(2750 * 2450 * 3)  # ~20.2 MB de datos de imagen
+    img_20mb = Image.frombytes("RGB", (2750, 2450), raw_rgb_20mb)
+    bmp_buf = io.BytesIO()
+    img_20mb.save(bmp_buf, format="JPEG", quality=100, subsampling=0)
+    doc = fitz.open()
+    p = doc.new_page(width=595, height=842)
+    p.insert_image(fitz.Rect(20, 20, 575, 822), stream=bmp_buf.getvalue())
+    doc.save(str(pdf_heavy_1p), deflate=False)
+    doc.close()
+
+    # 5) Uno ya comprimido (debe descartar el resultado si no logra reducir y dejar el original intacto)
+    pdf_already_compressed = tmp_path / "5_ya_comprimido.pdf"
+    PDFEngine.compress_pdf(
+        pdf_scan_10p,
+        pdf_already_compressed,
+        level=CompressionLevel.EXTREME,
+    )
+    # Comprimir una segunda vez en EXTREME para garantizar que ya está en su mínimo absoluto
+    pdf_already_min = tmp_path / "5_ya_comprimido_min.pdf"
+    res_min = PDFEngine.compress_pdf(
+        pdf_already_compressed,
+        pdf_already_min,
+        level=CompressionLevel.EXTREME,
+    )
+    if pdf_already_min.exists():
+        pdf_already_compressed = pdf_already_min
+
+    # 6) Uno cifrado (con contraseña)
+    pdf_encrypted = tmp_path / "6_cifrado.pdf"
+    doc = fitz.open()
+    for i in range(3):
+        p = doc.new_page(width=595, height=842)
+        p.insert_text((54, 60), f"Pliego confidencial página {i + 1}", fontsize=13)
+        p.insert_image(fitz.Rect(54, 90, 541, 760), stream=_make_photo_bytes(1400, 1750, 600 + i))
+    doc.save(
+        str(pdf_encrypted),
+        encryption=fitz.PDF_ENCRYPT_AES_256,
+        user_pw="floral123",
+        owner_pw="floral123",
+        deflate=True,
+    )
+    doc.close()
+
+    # 7) Uno diminuto (<100 KB)
+    pdf_tiny = tmp_path / "7_diminuto.pdf"
+    doc = fitz.open()
+    p = doc.new_page(width=595, height=842)
+    p.insert_text((72, 100), "Nota breve en libreta (<100 KB).", fontsize=12)
+    doc.save(str(pdf_tiny), garbage=4, deflate=True)
+    doc.close()
+    assert pdf_tiny.stat().st_size < 100 * 1024
+
+    cases = [
+        ("1. Escaneo 10 págs", pdf_scan_10p, None, True),
+        ("2. Solo texto vectorial", pdf_text_only, None, False),
+        ("3. Mixto texto+img+TOC+SMask", pdf_mixed, None, True),
+        ("4. 1 pág imagen pesada", pdf_heavy_1p, None, True),
+        ("5. Ya comprimido", pdf_already_compressed, None, False),
+        ("6. Cifrado (AES-256)", pdf_encrypted, "floral123", True),
+        ("7. Diminuto (<100 KB)", pdf_tiny, None, False),
+    ]
+
+    for label, src_path, pwd, has_compressible_images in cases:
+        orig_size = src_path.stat().st_size
+        estimates = PDFEngine.estimate_pdf_compression_for_all_levels(src_path, password=pwd)
+
+        # Monotonía de la estimación
+        est_low = int(estimates["low_loss"]["estimatedBytes"])
+        est_rec = int(estimates["recommended"]["estimatedBytes"])
+        est_ext = int(estimates["extreme"]["estimatedBytes"])
+        assert est_ext <= est_rec <= est_low <= orig_size, f"Fallo monotonía estimada en {label}"
+
+        real_sizes: dict[str, int] = {}
+        real_pcts: dict[str, float] = {}
+        for idx_lvl, lvl in enumerate(
+            (CompressionLevel.LOW_LOSS, CompressionLevel.RECOMMENDED, CompressionLevel.EXTREME)
+        ):
+            out_path = tmp_path / f"out_{src_path.stem}_{lvl.value}.pdf"
+            res = PDFEngine.compress_pdf(src_path, out_path, level=lvl, password=pwd)
+            real_sizes[lvl.value] = res.final_size_bytes
+            real_pcts[lvl.value] = res.saved_percentage
+
+            if res.final_size_bytes < orig_size:
+                assert out_path.exists()
+                assert "De " in res.message and "(-" in res.message
+            else:
+                # Si no reduce, se descarta y se informa que ya está optimizado
+                assert res.final_size_bytes == orig_size
+                assert "optimizado" in res.message
+
+        # Monotonía real garantizada: Extrema <= Recomendada <= Baja pérdida <= Original
+        assert (
+            real_sizes["extreme"]
+            <= real_sizes["recommended"]
+            <= real_sizes["low_loss"]
+            <= orig_size
+        ), f"Fallo monotonía real en {label}: {real_sizes} vs orig {orig_size}"
+
+        if has_compressible_images:
+            # En PDFs con imágenes aún no exprimidas, Extrema debe reducir de verdad y diferenciarse
+            assert real_sizes["extreme"] < real_sizes["recommended"] <= real_sizes["low_loss"] < orig_size
+            # Estimado dentro de <= 5 puntos porcentuales del real
+            for lvl_key in ("low_loss", "recommended", "extreme"):
+                est_pct = float(estimates[lvl_key]["savedPct"])
+                diff_pts = abs(est_pct - real_pcts[lvl_key])
+                assert diff_pts <= 5.0, (
+                    f"Desviación >5 pts en {label} ({lvl_key}): est={est_pct}% vs real={real_pcts[lvl_key]}%"
+                )
+
+    # Verificar integridad en el PDF mixto (texto seleccionable, TOC, número de páginas y SMask conservados)
+    mixed_ext_out = tmp_path / f"out_{pdf_mixed.stem}_extreme.pdf"
+    with fitz.open(mixed_ext_out) as doc_out:
+        assert doc_out.page_count == 5
+        assert len(doc_out.get_toc()) == 3
+        assert "Herbarios Ilustrados" in doc_out[0].get_text()
+        assert len(doc_out[0].get_links()) >= 1
+        smask_found = any(int(im[1]) > 0 for im in doc_out[0].get_images(full=True))
+        assert smask_found is True
+
+    # Verificar detección de firma digital criptográfica (/Sig)
+    pdf_signed_sig = tmp_path / "con_firma_criptografica.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    widget = fitz.Widget()
+    widget.rect = fitz.Rect(50, 50, 200, 100)
+    widget.field_name = "FirmaOficial"
+    widget.field_type = fitz.PDF_WIDGET_TYPE_SIGNATURE
+    page.add_widget(widget)
+    doc.save(str(pdf_signed_sig))
+    doc.close()
+    assert PDFEngine.has_digital_signature(pdf_signed_sig) is True
+    assert PDFEngine.has_digital_signature(pdf_text_only) is False
+
+    # Verificar que cancelar a mitad de compresión limpia archivos temporales (.tmp_compress_*)
+    cancel_out = tmp_path / "cancel_compress_out.pdf"
+    calls = 0
+
+    def _cancel_midway() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 3
+
+    with pytest.raises(TaskCancelledError):
+        PDFEngine.compress_pdf(
+            pdf_scan_10p,
+            cancel_out,
+            level=CompressionLevel.EXTREME,
+            is_cancelled=_cancel_midway,
+        )
+    assert not cancel_out.exists()
+    leftover_tmps = list(tmp_path.glob(".tmp_compress_*"))
+    assert leftover_tmps == []
+
+
+

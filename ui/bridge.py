@@ -198,6 +198,12 @@ class StudioBridge(QObject):
         self._range_feedback: str = "Ingresa un rango como '1-5, 8, 11-13'"
         self._split_separate: bool = False
         self._compression_level: str = CompressionLevel.RECOMMENDED.value
+        self._compression_estimate_cache: dict[
+            tuple[str, int, int], dict[str, dict[str, float | int | bool]]
+        ] = {}
+        self._is_estimating_compression: bool = False
+        self._estimate_generation_id: int = 0
+        self._active_estimate_worker: PDFOperationWorker | None = None
         self._password_input: str = ""
         self._image_format: str = ImageFormat.PNG.value
         self._watermark_text: str = "CONFIDENCIAL"
@@ -491,6 +497,7 @@ class StudioBridge(QObject):
             self.activeToolChanged.emit()
             self.filesChanged.emit()
             self.progressChanged.emit()
+            self._schedule_compression_estimation()
 
     def _sync_contextual_tool_after_queue_change(self) -> None:
         """Sincroniza la herramienta activa y el modo de vista tras cambios en la cola de archivos."""
@@ -542,6 +549,17 @@ class StudioBridge(QObject):
         if changed:
             self.activeToolChanged.emit()
         self._revalidate_range()
+        self._schedule_compression_estimation()
+        if tool_id == ToolType.COMPRESS.value:
+            for qf in self._valid_queued_files():
+                if qf.file_path.suffix.lower() in SUPPORTED_PDF_EXTENSIONS:
+                    pwd = self._passwords.get(qf.file_path.resolve())
+                    if PDFEngine.has_digital_signature(qf.file_path, password=pwd):
+                        self._emit_notice(
+                            f"Aviso: '{qf.file_path.name}' contiene una firma digital criptográfica que se invalidará al comprimirlo.",
+                            is_error=False,
+                        )
+                        break
         if (
             tool_id in {ToolType.ORGANIZE.value, ToolType.SIGN.value}
             and self._queued_files
@@ -863,6 +881,7 @@ class StudioBridge(QObject):
             self._revalidate_range()
             self._sync_contextual_tool_after_queue_change()
             self._update_ready_status_message()
+            self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
 
@@ -884,6 +903,7 @@ class StudioBridge(QObject):
             self._revalidate_range()
             self._sync_contextual_tool_after_queue_change()
             self._update_ready_status_message()
+            self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
 
@@ -901,6 +921,7 @@ class StudioBridge(QObject):
             self._revalidate_range()
             self._sync_contextual_tool_after_queue_change()
             self._update_ready_status_message()
+            self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
 
@@ -924,6 +945,7 @@ class StudioBridge(QObject):
         self._rebuild_pages_from_primary_file()
         self._revalidate_range()
         self._update_ready_status_message()
+        self._schedule_compression_estimation()
         self.filesChanged.emit()
         self.activeToolChanged.emit()
         return True
@@ -937,6 +959,7 @@ class StudioBridge(QObject):
             self._revalidate_range()
             self._sync_contextual_tool_after_queue_change()
             self._update_ready_status_message()
+            self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
 
@@ -976,6 +999,7 @@ class StudioBridge(QObject):
         self.task_manager.thumbnail_cache.clear()
         self._is_tool_selected = False
         self._has_processing_error = False
+        self._schedule_compression_estimation()
         self._sync_contextual_tool_after_queue_change()
         self._update_ready_status_message()
         self.filesChanged.emit()
@@ -1560,12 +1584,225 @@ class StudioBridge(QObject):
             self._compression_level = level
             self.configChanged.emit()
 
+    def _file_cache_key(self, file_path: Path) -> tuple[str, int, int] | None:
+        try:
+            resolved = file_path.resolve()
+            st = resolved.stat()
+            return (str(resolved), int(st.st_mtime_ns), int(st.st_size))
+        except OSError:
+            return None
+
+    def _queued_valid_pdf_files(self) -> list[QueuedFile]:
+        return [
+            qf
+            for qf in self._valid_queued_files()
+            if qf.file_path.suffix.lower() in SUPPORTED_PDF_EXTENSIONS
+        ]
+
+    @staticmethod
+    def _estimate_batch_task(
+        items: list[tuple[tuple[str, int, int], Path, str | None]],
+        on_progress: Any = None,
+        is_cancelled: Any = None,
+    ) -> dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]]:
+        """Calcula la estimación real basada en muestra en un hilo QRunnable sin bloquear la UI."""
+        results: dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]] = {}
+        for cache_key, path, pwd in items:
+            if is_cancelled is not None and is_cancelled():
+                raise TaskCancelledError("Cálculo de estimación cancelado.")
+            try:
+                est = PDFEngine.estimate_pdf_compression_for_all_levels(
+                    path, password=pwd, is_cancelled=is_cancelled
+                )
+                results[cache_key] = est
+            except TaskCancelledError:
+                raise
+            except Exception:
+                size_b = cache_key[2]
+                results[cache_key] = {
+                    lvl.value: {
+                        "originalBytes": size_b,
+                        "estimatedBytes": size_b,
+                        "savedPct": 0.0,
+                        "alreadyLight": True,
+                    }
+                    for lvl in CompressionLevel
+                }
+        return results
+
+    def _schedule_compression_estimation(self) -> None:
+        """Lanza o reutiliza en caché la estimación asíncrona de compresión y cancela cálculos obsoletos."""
+        self._estimate_generation_id += 1
+        gen_id = self._estimate_generation_id
+        if self._active_estimate_worker is not None:
+            self._active_estimate_worker.cancel()
+            self._active_estimate_worker = None
+
+        if self._active_tool != ToolType.COMPRESS.value:
+            if self._is_estimating_compression:
+                self._is_estimating_compression = False
+            self.configChanged.emit()
+            return
+
+        pdf_files = self._queued_valid_pdf_files()
+        if not pdf_files:
+            if self._is_estimating_compression:
+                self._is_estimating_compression = False
+            self.configChanged.emit()
+            return
+
+        missing_items: list[tuple[tuple[str, int, int], Path, str | None]] = []
+        for qf in pdf_files:
+            ck = self._file_cache_key(qf.file_path)
+            if ck is None:
+                continue
+            if ck not in self._compression_estimate_cache:
+                pwd = self._passwords.get(qf.file_path.resolve())
+                missing_items.append((ck, qf.file_path, pwd))
+
+        if not missing_items:
+            self._is_estimating_compression = False
+            self.configChanged.emit()
+            return
+
+        self._is_estimating_compression = True
+        self.configChanged.emit()
+
+        worker = PDFOperationWorker(self._estimate_batch_task, missing_items)
+        self._active_estimate_worker = worker
+
+        def _on_est_finished(
+            res: dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]],
+            expected_gen: int = gen_id,
+        ) -> None:
+            if isinstance(res, dict):
+                self._compression_estimate_cache.update(res)
+            if expected_gen == self._estimate_generation_id:
+                self._is_estimating_compression = False
+                self._active_estimate_worker = None
+                self.configChanged.emit()
+
+        def _on_est_stopped(
+            _msg: str = "",
+            expected_gen: int = gen_id,
+        ) -> None:
+            if expected_gen == self._estimate_generation_id:
+                self._is_estimating_compression = False
+                self._active_estimate_worker = None
+                self.configChanged.emit()
+
+        worker.signals.finished.connect(_on_est_finished)
+        worker.signals.cancelled.connect(_on_est_stopped)
+        worker.signals.error.connect(_on_est_stopped)
+        self.task_manager.pool.start(worker)
+
+    def _aggregate_compression_estimates(
+        self,
+    ) -> dict[str, dict[str, float | int | bool]] | None:
+        """Suma las estimaciones en caché para todos los PDFs válidos en cola."""
+        pdf_files = self._queued_valid_pdf_files()
+        if not pdf_files:
+            return None
+
+        totals: dict[str, dict[str, int]] = {
+            lvl.value: {"orig": 0, "est": 0} for lvl in CompressionLevel
+        }
+        for qf in pdf_files:
+            ck = self._file_cache_key(qf.file_path)
+            if ck is None or ck not in self._compression_estimate_cache:
+                return None
+            per_file = self._compression_estimate_cache[ck]
+            for lvl in CompressionLevel:
+                entry = per_file.get(lvl.value, {})
+                totals[lvl.value]["orig"] += int(
+                    entry.get("originalBytes", qf.original_size_bytes)
+                )
+                totals[lvl.value]["est"] += int(
+                    entry.get("estimatedBytes", qf.original_size_bytes)
+                )
+
+        ext_orig = max(1, totals[CompressionLevel.EXTREME.value]["orig"])
+        ext_est = totals[CompressionLevel.EXTREME.value]["est"]
+        max_pct = max(0.0, ((ext_orig - ext_est) / float(ext_orig)) * 100.0)
+        already_light_all = max_pct < 5.0
+
+        agg: dict[str, dict[str, float | int | bool]] = {}
+        for lvl in CompressionLevel:
+            orig_b = totals[lvl.value]["orig"]
+            est_b = totals[lvl.value]["est"]
+            pct = (
+                max(0.0, ((orig_b - est_b) / float(orig_b)) * 100.0)
+                if orig_b > 0
+                else 0.0
+            )
+            agg[lvl.value] = {
+                "originalBytes": orig_b,
+                "estimatedBytes": est_b,
+                "savedPct": round(pct, 1),
+                "alreadyLight": already_light_all or pct < 5.0 or (orig_b - est_b) < 2048,
+            }
+        return agg
+
+    @Property(bool, notify=configChanged)
+    def isEstimatingCompression(self) -> bool:
+        return self._is_estimating_compression
+
+    @Property("QVariantList", notify=configChanged)
+    def compressionLevelOptions(self) -> list[dict[str, Any]]:
+        """Opciones de nivel de compresión con porcentajes calculados por archivo (nunca fijos)."""
+        agg = self._aggregate_compression_estimates()
+        base_labels = [
+            (CompressionLevel.EXTREME.value, "Extrema"),
+            (CompressionLevel.RECOMMENDED.value, "Recomendada"),
+            (CompressionLevel.LOW_LOSS.value, "Baja pérdida"),
+        ]
+        if agg is None or self._is_estimating_compression:
+            return [
+                {
+                    "key": key,
+                    "label": f"{title} (...)",
+                    "savedPct": 0.0,
+                }
+                for key, title in base_labels
+            ]
+
+        options: list[dict[str, Any]] = []
+        for key, title in base_labels:
+            pct = float(agg[key]["savedPct"])
+            pct_int = int(round(pct))
+            options.append(
+                {
+                    "key": key,
+                    "label": f"{title} (~{pct_int}%)",
+                    "savedPct": pct,
+                }
+            )
+        return options
+
     @Property(str, notify=configChanged)
     def estimatedCompressionSummary(self) -> str:
-        base_bytes = self.totalQueuedBytes or (1024 * 1024)
-        lvl = CompressionLevel(self._compression_level)
-        est_final, pct = PDFEngine.estimate_compression_savings(base_bytes, lvl)
-        return f"Reducción estimada ~{pct:.0f}% (de {_format_bytes(base_bytes)} a ~{_format_bytes(est_final)})"
+        pdf_files = self._queued_valid_pdf_files()
+        if not pdf_files:
+            return "Agrega un pliego PDF para calcular la reducción real."
+        agg = self._aggregate_compression_estimates()
+        if agg is None or self._is_estimating_compression:
+            return "Calculando..."
+
+        entry = agg.get(
+            self._compression_level,
+            agg[CompressionLevel.RECOMMENDED.value],
+        )
+        orig_b = int(entry["originalBytes"])
+        est_b = int(entry["estimatedBytes"])
+        pct = float(entry["savedPct"])
+        already_light = bool(entry["alreadyLight"])
+
+        summary = (
+            f"Reducción estimada ~{pct:.0f}% (de {_format_bytes(orig_b)} a ~{_format_bytes(est_b)})"
+        )
+        if already_light:
+            return f"Este pliego ya está muy ligero · {summary}"
+        return summary
 
     @Property(str, notify=configChanged)
     def passwordInput(self) -> str:
@@ -1873,6 +2110,7 @@ class StudioBridge(QObject):
     ) -> OperationResult:
         """Ejecuta compresión, exportación a imágenes o marca de agua sobre un lote de PDFs."""
         all_outputs: list[Path] = []
+        per_file_summaries: list[str] = []
         total_orig = 0
         total_final = 0
         total = len(pdf_files)
@@ -1929,19 +2167,31 @@ class StudioBridge(QObject):
             all_outputs.extend(res.output_files)
             total_orig += res.original_size_bytes
             total_final += res.final_size_bytes
+            if tool == ToolType.COMPRESS:
+                per_file_summaries.append(f"{pdf_path.name}: {res.message}")
 
         saved_pct = (
             max(0.0, ((total_orig - total_final) / total_orig) * 100.0)
             if total_orig > 0 and tool == ToolType.COMPRESS
             else 0.0
         )
+        if tool == ToolType.COMPRESS:
+            orig_str = _format_bytes(total_orig).replace(".", ",")
+            final_str = _format_bytes(total_final).replace(".", ",")
+            batch_msg = (
+                f"De {orig_str} a {final_str} (-{saved_pct:.0f}%) — "
+                + " · ".join(per_file_summaries)
+            )
+        else:
+            batch_msg = f"Lote procesado con éxito ({total} pliegos PDF, {len(all_outputs)} archivo(s) generados)."
+
         return OperationResult(
             tool=tool,
             output_files=all_outputs,
             original_size_bytes=total_orig,
             final_size_bytes=total_final,
             saved_percentage=round(saved_pct, 2),
-            message=f"Lote procesado con éxito ({total} pliegos PDF, {len(all_outputs)} archivo(s) generados).",
+            message=batch_msg,
         )
 
     def _build_worker_for_tool(

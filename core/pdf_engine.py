@@ -25,7 +25,9 @@ from core.exceptions import (
     TaskCancelledError,
 )
 from core.models import (
+    COMPRESSION_PROFILES,
     CompressionLevel,
+    CompressionProfile,
     ImageFormat,
     OperationResult,
     PageItemInstruction,
@@ -236,6 +238,19 @@ def _atomic_write_pdf(
         raise
 
 
+def _format_size_es(size_bytes: int) -> str:
+    """Formatea un tamaño en bytes con coma decimal en español (ej. '2,8 MB', '420 KB')."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    kb = size_bytes / 1024.0
+    if kb < 1024.0:
+        if kb >= 100.0 or abs(kb - round(kb)) < 0.05:
+            return f"{int(round(kb))} KB"
+        return f"{kb:.1f}".replace(".", ",") + " KB"
+    mb = kb / 1024.0
+    return f"{mb:.1f}".replace(".", ",") + " MB"
+
+
 class PDFEngine:
     """Motor principal para todas las operaciones sobre documentos PDF e imágenes."""
 
@@ -243,10 +258,458 @@ class PDFEngine:
     def estimate_compression_savings(
         original_bytes: int, level: CompressionLevel
     ) -> tuple[int, float]:
-        """Calcula el peso estimado final y porcentaje ahorrado según el nivel de compresión."""
+        """Calcula el peso estimado final y porcentaje ahorrado de respaldo."""
         pct = COMPRESSION_ESTIMATES.get(level, 38.0)
         estimated_final = max(1, int(original_bytes * (1.0 - pct / 100.0)))
         return estimated_final, pct
+
+    @staticmethod
+    def has_digital_signature(
+        file_path: Path, password: str | None = None
+    ) -> bool:
+        """Detecta si el PDF contiene campos u objetos de firma digital criptográfica (/Sig /ByteRange)."""
+        path = Path(file_path)
+        if not path.exists() or not path.is_file() or path.stat().st_size == 0:
+            return False
+        try:
+            doc = fitz.open(path)
+        except Exception:
+            return False
+        try:
+            if doc.needs_pass:
+                if not password or doc.authenticate(password) == 0:
+                    return False
+            for p_idx in range(min(doc.page_count, 50)):
+                page = doc.load_page(p_idx)
+                for w in page.widgets() or []:
+                    if getattr(w, "field_type", None) == getattr(
+                        fitz, "PDF_WIDGET_TYPE_SIGNATURE", 6
+                    ):
+                        return True
+            xref_len = doc.xref_length()
+            for xref in range(1, min(xref_len, 800)):
+                try:
+                    obj_str = doc.xref_object(xref, compressed=True)
+                except Exception:
+                    continue
+                if "/ByteRange" in obj_str and (
+                    "/Type/Sig" in obj_str
+                    or "/Type /Sig" in obj_str
+                    or "/FT/Sig" in obj_str
+                    or "/FT /Sig" in obj_str
+                    or "/SubFilter" in obj_str
+                ):
+                    return True
+            return False
+        finally:
+            doc.close()
+
+    @staticmethod
+    def _collect_document_image_xrefs(
+        doc: fitz.Document,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> dict[int, dict[str, object]]:
+        """Recorre el documento y agrupa todas las imágenes únicas por XREF calculando su máximo DPI efectivo."""
+        xref_map: dict[int, dict[str, object]] = {}
+        smask_xrefs: set[int] = set()
+
+        for p_idx in range(doc.page_count):
+            _check_cancel(is_cancelled)
+            page = doc.load_page(p_idx)
+            page_imgs = doc.get_page_images(p_idx)
+            smask_by_xref: dict[int, int] = {}
+            bpc_by_xref: dict[int, int] = {}
+            cs_by_xref: dict[int, str] = {}
+            filter_by_xref: dict[int, str] = {}
+
+            for item in page_imgs:
+                xr = int(item[0])
+                sm = int(item[1])
+                if sm > 0:
+                    smask_xrefs.add(sm)
+                    smask_by_xref[xr] = sm
+                bpc_by_xref[xr] = int(item[4]) if len(item) > 4 else 8
+                cs_by_xref[xr] = str(item[5]) if len(item) > 5 else ""
+                filter_by_xref[xr] = str(item[8]) if len(item) > 8 else ""
+
+            try:
+                infos = page.get_image_info(xrefs=True)
+            except Exception:
+                infos = []
+
+            for info in infos:
+                xr = int(info.get("xref", 0) or 0)
+                if xr <= 0:
+                    continue
+                w_px = int(info.get("width", 0) or 0)
+                h_px = int(info.get("height", 0) or 0)
+                bbox = info.get("bbox", (0.0, 0.0, 72.0, 72.0))
+                bw_pt = max(1.0, abs(float(bbox[2]) - float(bbox[0])))
+                bh_pt = max(1.0, abs(float(bbox[3]) - float(bbox[1])))
+                eff_dpi_x = w_px / (bw_pt / 72.0)
+                eff_dpi_y = h_px / (bh_pt / 72.0)
+                eff_dpi = max(eff_dpi_x, eff_dpi_y)
+
+                if xr not in xref_map:
+                    try:
+                        raw_bytes = doc.xref_stream_raw(xr)
+                        raw_len = len(raw_bytes)
+                    except Exception:
+                        raw_len = 0
+                    xref_map[xr] = {
+                        "xref": xr,
+                        "first_page": p_idx,
+                        "smask": smask_by_xref.get(xr, 0),
+                        "width": w_px,
+                        "height": h_px,
+                        "bpc": int(info.get("bpc", bpc_by_xref.get(xr, 8)) or 8),
+                        "colorspace": cs_by_xref.get(xr, ""),
+                        "filter": filter_by_xref.get(xr, ""),
+                        "max_eff_dpi": eff_dpi,
+                        "raw_len": raw_len,
+                    }
+                else:
+                    prev_dpi = float(xref_map[xr]["max_eff_dpi"])
+                    if eff_dpi > prev_dpi:
+                        xref_map[xr]["max_eff_dpi"] = eff_dpi
+
+        # Excluir cualquier xref que actúe como máscara de transparencia (SMask)
+        for sm in smask_xrefs:
+            xref_map.pop(sm, None)
+
+        return xref_map
+
+    @staticmethod
+    def _decode_xref_to_qimage(
+        doc: fitz.Document, meta: dict[str, object]
+    ) -> QImage | None:
+        """Decodifica un XREF de imagen (incluyendo CMYK/ICC/JPX) a un QImage independiente en memoria."""
+        from PySide6.QtGui import QGuiApplication
+
+        if QGuiApplication.instance() is None:
+            _ = QGuiApplication([])
+
+        xref = int(meta["xref"])
+        raw_len = int(meta["raw_len"])
+        if raw_len < 512:
+            return None
+
+        try:
+            pix = fitz.Pixmap(doc, xref)
+        except Exception:
+            return None
+
+        try:
+            if pix.width < 16 or pix.height < 16 or pix.colorspace is None:
+                return None
+
+            base_channels = pix.n - pix.alpha
+            if base_channels not in (1, 3):
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            if pix.alpha:
+                pix = fitz.Pixmap(pix, 0)
+
+            w, h, n = pix.width, pix.height, pix.n
+            if n == 1:
+                qimg = QImage(
+                    pix.samples, w, h, pix.stride, QImage.Format.Format_Grayscale8
+                ).copy()
+            else:
+                if n != 3:
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                    w, h = pix.width, pix.height
+                qimg = QImage(
+                    pix.samples, w, h, pix.stride, QImage.Format.Format_RGB888
+                ).copy()
+            return qimg
+        except Exception:
+            return None
+        finally:
+            pix = None
+
+    @staticmethod
+    def _encode_qimage_for_profile(
+        qimg: QImage,
+        meta: dict[str, object],
+        profile: CompressionProfile,
+    ) -> tuple[bytes | None, int, int]:
+        """Escala un QImage según el DPI objetivo del perfil y lo codifica en JPEG si reduce el tamaño real."""
+        orig_w = qimg.width()
+        orig_h = qimg.height()
+        raw_len = int(meta["raw_len"])
+        bpc = int(meta["bpc"])
+        max_eff_dpi = float(meta["max_eff_dpi"])
+
+        # Escaneos bitonales (1-bit B/N, JBIG2, CCITT): conservar intactos salvo en Extrema con DPI muy alto
+        if bpc == 1 and (
+            profile.level != CompressionLevel.EXTREME or max_eff_dpi <= 250.0
+        ):
+            return None, orig_w, orig_h
+
+        target_w, target_h = orig_w, orig_h
+        if max_eff_dpi > profile.dpi_threshold and max_eff_dpi > 1.0:
+            ratio = profile.dpi_target / max_eff_dpi
+            if ratio < 0.98:
+                target_w = max(16, int(round(orig_w * ratio)))
+                target_h = max(16, int(round(orig_h * ratio)))
+
+        max_dim = max(target_w, target_h)
+        if max_dim > profile.max_side_px:
+            cap_ratio = profile.max_side_px / float(max_dim)
+            target_w = max(16, int(round(target_w * cap_ratio)))
+            target_h = max(16, int(round(target_h * cap_ratio)))
+
+        work_img = (
+            qimg.scaled(
+                target_w,
+                target_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            if (target_w != orig_w or target_h != orig_h)
+            else qimg
+        )
+
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        ok = work_img.save(buf, "JPG", profile.jpeg_quality)
+        if not ok:
+            return None, orig_w, orig_h
+        jpg_bytes = bytes(buf.data())
+
+        if len(jpg_bytes) < raw_len - 64:
+            return jpg_bytes, work_img.width(), work_img.height()
+        return None, orig_w, orig_h
+
+    @staticmethod
+    def _scale_smask_if_needed(
+        doc: fitz.Document, smask_xref: int, target_w: int, target_h: int
+    ) -> None:
+        """Escala la máscara de transparencia (SMask) cuando la imagen base cambia de resolución."""
+        if smask_xref <= 0:
+            return
+        try:
+            sm_pix = fitz.Pixmap(doc, smask_xref)
+            if sm_pix.width == target_w and sm_pix.height == target_h:
+                return
+            if sm_pix.n != 1:
+                sm_pix = fitz.Pixmap(fitz.csGRAY, sm_pix)
+            qsm = QImage(
+                sm_pix.samples,
+                sm_pix.width,
+                sm_pix.height,
+                sm_pix.stride,
+                QImage.Format.Format_Grayscale8,
+            ).copy()
+            sm_pix = None
+            scaled_sm = qsm.scaled(
+                target_w,
+                target_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ).convertToFormat(QImage.Format.Format_Grayscale8)
+            raw_rows = bytearray()
+            ptr = memoryview(scaled_sm.constBits())
+            bpl = scaled_sm.bytesPerLine()
+            for r in range(target_h):
+                raw_rows.extend(ptr[r * bpl : r * bpl + target_w])
+            doc.update_stream(smask_xref, bytes(raw_rows), compress=True)
+            doc.xref_set_key(smask_xref, "Width", str(target_w))
+            doc.xref_set_key(smask_xref, "Height", str(target_h))
+            doc.xref_set_key(smask_xref, "Filter", "/FlateDecode")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _verify_compressed_pdf_integrity(
+        comp_path: Path,
+        orig_meta: dict[str, object],
+    ) -> None:
+        """Verifica que el PDF comprimido abra sin errores y conserve páginas, texto seleccionable, TOC, formularios y SMask."""
+        try:
+            out_doc = fitz.open(comp_path)
+        except Exception as exc:
+            raise PDFStudioError(
+                "El archivo comprimido generado no superó la validación de apertura."
+            ) from exc
+
+        try:
+            if out_doc.page_count != int(orig_meta["page_count"]):
+                raise PDFStudioError(
+                    "El número de páginas del PDF comprimido no coincide con el original."
+                )
+
+            if len(out_doc.get_toc()) != int(orig_meta["toc_count"]):
+                raise PDFStudioError(
+                    "Los marcadores (TOC) del PDF no se conservaron tras la compresión."
+                )
+
+            text_sample_pages: list[int] = list(orig_meta.get("text_pages", []))  # type: ignore[arg-type]
+            for p_idx in text_sample_pages:
+                if len(out_doc.load_page(p_idx).get_text("text").strip()) == 0:
+                    raise PDFStudioError(
+                        f"El texto seleccionable de la página {p_idx + 1} se perdió durante la compresión."
+                    )
+
+            smask_pages: list[int] = list(orig_meta.get("smask_pages", []))  # type: ignore[arg-type]
+            for p_idx in smask_pages:
+                imgs = out_doc.get_page_images(p_idx)
+                if not any(int(item[1]) > 0 for item in imgs):
+                    raise PDFStudioError(
+                        f"La transparencia (SMask) en la página {p_idx + 1} no se conservó."
+                    )
+        finally:
+            out_doc.close()
+
+    @staticmethod
+    def estimate_pdf_compression_for_all_levels(
+        file_path: Path,
+        password: str | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> dict[str, dict[str, float | int | bool]]:
+        """Calcula en segundo plano la estimación real basada en muestra para los 3 niveles (Extrema, Recomendada, Baja pérdida)."""
+        path = Path(file_path)
+        info = inspect_pdf_file(path, password=password)
+        orig_bytes = info.original_size_bytes
+        if info.is_encrypted and not password:
+            return {
+                lvl.value: {
+                    "originalBytes": orig_bytes,
+                    "estimatedBytes": orig_bytes,
+                    "savedPct": 0.0,
+                    "alreadyLight": True,
+                }
+                for lvl in CompressionLevel
+            }
+
+        doc = fitz.open(path)
+        try:
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+
+            _check_cancel(is_cancelled)
+            xref_map = PDFEngine._collect_document_image_xrefs(
+                doc, is_cancelled=is_cancelled
+            )
+            total_img_raw = sum(int(m["raw_len"]) for m in xref_map.values())
+            non_img_bytes = max(0, orig_bytes - total_img_raw)
+
+            # Seleccionar muestra: hasta las 4 imágenes de mayor peso (o todas si hay <= 6 y son ligeras)
+            sorted_metas = sorted(
+                xref_map.values(), key=lambda m: int(m["raw_len"]), reverse=True
+            )
+            sample_count = min(len(sorted_metas), 4)
+            sample_metas = sorted_metas[:sample_count]
+            sample_orig_raw = sum(int(m["raw_len"]) for m in sample_metas)
+
+            # Decodificar cada imagen de la muestra UNA sola vez a QImage y probar los 3 perfiles
+            decoded_samples: list[tuple[dict[str, object], QImage]] = []
+            for meta in sample_metas:
+                _check_cancel(is_cancelled)
+                qimg = PDFEngine._decode_xref_to_qimage(doc, meta)
+                if qimg is not None:
+                    decoded_samples.append((meta, qimg))
+
+            # Si el archivo es pequeño/mediano (<= 2.5 MB) o dominado por vectores/estructura,
+            # medir el ahorro estructural exacto de tobytes() sin tocar imágenes (~5-12 ms)
+            struct_saved_by_level: dict[CompressionLevel, int] = {
+                CompressionLevel.LOW_LOSS: int(non_img_bytes * 0.04),
+                CompressionLevel.RECOMMENDED: int(non_img_bytes * 0.08),
+                CompressionLevel.EXTREME: int(non_img_bytes * 0.18),
+            }
+            if orig_bytes <= 2_500_000:
+                for lvl, prof in COMPRESSION_PROFILES.items():
+                    _check_cancel(is_cancelled)
+                    try:
+                        probe_doc = fitz.open(path)
+                        try:
+                            if probe_doc.needs_pass and password:
+                                probe_doc.authenticate(password)
+                            if prof.strip_metadata:
+                                probe_doc.set_metadata({})
+                            if prof.strip_xml_metadata:
+                                try:
+                                    probe_doc.del_xml_metadata()
+                                except Exception:
+                                    pass
+                            struct_bytes = len(
+                                probe_doc.tobytes(
+                                    garbage=prof.garbage,
+                                    deflate=True,
+                                    clean=True,
+                                    deflate_images=True,
+                                    deflate_fonts=True,
+                                    use_objstms=prof.use_objstms,
+                                )
+                            )
+                            struct_saved_by_level[lvl] = max(0, orig_bytes - struct_bytes)
+                        finally:
+                            probe_doc.close()
+                    except Exception:
+                        pass
+
+            raw_est_by_level: dict[CompressionLevel, int] = {}
+            for lvl in (
+                CompressionLevel.LOW_LOSS,
+                CompressionLevel.RECOMMENDED,
+                CompressionLevel.EXTREME,
+            ):
+                _check_cancel(is_cancelled)
+                prof = COMPRESSION_PROFILES[lvl]
+                sample_saved = 0
+                for meta, qimg in decoded_samples:
+                    jpg_bytes, _, _ = PDFEngine._encode_qimage_for_profile(
+                        qimg, meta, prof
+                    )
+                    if jpg_bytes is not None:
+                        sample_saved += max(0, int(meta["raw_len"]) - len(jpg_bytes))
+
+                if sample_orig_raw > 0 and total_img_raw > 0:
+                    extrapolated_img_saved = int(
+                        round(total_img_raw * (sample_saved / float(sample_orig_raw)))
+                    )
+                else:
+                    extrapolated_img_saved = 0
+
+                total_saved = struct_saved_by_level[lvl] + extrapolated_img_saved
+                est_final = max(128, orig_bytes - total_saved)
+                if est_final >= orig_bytes:
+                    est_final = orig_bytes
+                raw_est_by_level[lvl] = est_final
+
+            # Garantizar monotonía estricta en la estimación: Extrema <= Recomendada <= Baja pérdida <= original
+            est_low = min(orig_bytes, raw_est_by_level[CompressionLevel.LOW_LOSS])
+            est_rec = min(est_low, raw_est_by_level[CompressionLevel.RECOMMENDED])
+            est_ext = min(est_rec, raw_est_by_level[CompressionLevel.EXTREME])
+
+            final_map = {
+                CompressionLevel.LOW_LOSS: est_low,
+                CompressionLevel.RECOMMENDED: est_rec,
+                CompressionLevel.EXTREME: est_ext,
+            }
+            max_pct = (
+                ((orig_bytes - est_ext) / float(orig_bytes)) * 100.0
+                if orig_bytes > 0
+                else 0.0
+            )
+            already_light = max_pct < 5.0
+
+            out: dict[str, dict[str, float | int | bool]] = {}
+            for lvl, est_b in final_map.items():
+                pct = (
+                    max(0.0, ((orig_bytes - est_b) / float(orig_bytes)) * 100.0)
+                    if orig_bytes > 0
+                    else 0.0
+                )
+                out[lvl.value] = {
+                    "originalBytes": orig_bytes,
+                    "estimatedBytes": est_b,
+                    "savedPct": round(pct, 1),
+                    "alreadyLight": already_light or pct < 5.0 or (orig_bytes - est_b) < 2048,
+                }
+            return out
+        finally:
+            doc.close()
 
     @staticmethod
     def render_page_png_bytes(
@@ -490,7 +953,7 @@ class PDFEngine:
         on_progress: ProgressCallback | None = None,
         is_cancelled: CancelCheckCallback | None = None,
     ) -> OperationResult:
-        """Comprime un PDF limpiando objetos huérfanos, flujos y reescalando imágenes con PyMuPDF."""
+        """Comprime un PDF de forma monótona por nivel recodificando imágenes según su DPI efectivo y compactando flujos."""
         path = Path(input_file)
         info = inspect_pdf_file(path, password=password)
         if info.is_encrypted and not password:
@@ -499,50 +962,154 @@ class PDFEngine:
             )
 
         original_bytes = info.original_size_bytes
+        profile = COMPRESSION_PROFILES.get(
+            level, COMPRESSION_PROFILES[CompressionLevel.RECOMMENDED]
+        )
         safe_dest = ensure_safe_output_path(
             path, output_path, default_suffix="_comprimido"
         )
 
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".tmp_compress_", suffix=".pdf", dir=str(safe_dest.parent)
-        )
-        os.close(fd)
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=".tmp_compress_", suffix=".pdf", dir=str(safe_dest.parent)
+            )
+            os.close(fd)
+        except OSError as exc:
+            raise PDFStudioError(
+                f"No se pudo crear archivo temporal en '{safe_dest.parent}': verifica permisos y espacio en disco."
+            ) from exc
+
         tmp_path = Path(tmp_name)
+        has_sig = PDFEngine.has_digital_signature(path, password=password)
 
         doc = fitz.open(path)
         try:
             if doc.needs_pass and password:
                 doc.authenticate(password)
 
-            _emit_progress(on_progress, 20, "Analizando estructura y recursos...")
+            total_pages = doc.page_count
+            sample_check_indices = sorted(
+                {0, total_pages // 2, max(0, total_pages - 1)}
+            )
+            text_pages = [
+                p_idx
+                for p_idx in sample_check_indices
+                if len(doc.load_page(p_idx).get_text("text").strip()) > 0
+            ]
+            smask_pages = [
+                p_idx
+                for p_idx in sample_check_indices
+                if any(int(item[1]) > 0 for item in doc.get_page_images(p_idx))
+            ]
+            orig_meta: dict[str, object] = {
+                "page_count": total_pages,
+                "toc_count": len(doc.get_toc()),
+                "text_pages": text_pages,
+                "smask_pages": smask_pages,
+            }
+
+            _emit_progress(
+                on_progress, 10, f"Analizando {total_pages} página(s) e imágenes..."
+            )
             _check_cancel(is_cancelled)
 
-            # Ajustar parámetros de reescritura de imágenes según el nivel
-            if hasattr(doc, "rewrite_images"):
-                if level == CompressionLevel.EXTREME:
-                    doc.rewrite_images(dpi_threshold=100, dpi_target=72, quality=50)
-                elif level == CompressionLevel.RECOMMENDED:
-                    doc.rewrite_images(dpi_threshold=150, dpi_target=110, quality=72)
-                else:
-                    doc.rewrite_images(dpi_threshold=220, dpi_target=150, quality=85)
+            xref_map = PDFEngine._collect_document_image_xrefs(
+                doc, is_cancelled=is_cancelled
+            )
+            total_imgs = len(xref_map)
 
-            _emit_progress(on_progress, 65, "Compactando flujos y tabla XREF...")
+            for idx, (xref, meta) in enumerate(xref_map.items()):
+                _check_cancel(is_cancelled)
+                pct = 15 + int(((idx + 1) / max(1, total_imgs)) * 60)
+                _emit_progress(
+                    on_progress,
+                    pct,
+                    f"Optimizando imagen {idx + 1}/{total_imgs} (pág. {int(meta['first_page']) + 1}/{total_pages})...",
+                )
+                qimg = PDFEngine._decode_xref_to_qimage(doc, meta)
+                if qimg is None:
+                    continue
+                jpg_bytes, new_w, new_h = PDFEngine._encode_qimage_for_profile(
+                    qimg, meta, profile
+                )
+                qimg = None
+                if jpg_bytes is None:
+                    continue
+
+                first_page_idx = int(meta["first_page"])
+                smask_xref = int(meta["smask"])
+                doc.load_page(first_page_idx).replace_image(xref, stream=jpg_bytes)
+                if smask_xref > 0:
+                    PDFEngine._scale_smask_if_needed(
+                        doc, smask_xref, new_w, new_h
+                    )
+                    try:
+                        doc.xref_set_key(xref, "SMask", f"{smask_xref} 0 R")
+                    except Exception:
+                        pass
+
+            _emit_progress(on_progress, 82, "Compactando flujos y tabla de objetos...")
             _check_cancel(is_cancelled)
 
-            garbage_level = 4 if level != CompressionLevel.LOW_LOSS else 3
+            if profile.strip_metadata:
+                try:
+                    doc.set_metadata({})
+                except Exception:
+                    pass
+            if profile.strip_xml_metadata:
+                try:
+                    doc.del_xml_metadata()
+                except Exception:
+                    pass
+
             doc.save(
                 str(tmp_path),
-                garbage=garbage_level,
+                garbage=profile.garbage,
                 deflate=True,
                 clean=True,
                 deflate_images=True,
                 deflate_fonts=True,
+                use_objstms=profile.use_objstms,
             )
             doc.close()
             _check_cancel(is_cancelled)
-            shutil.move(str(tmp_path), str(safe_dest))
+
+            tmp_size = tmp_path.stat().st_size
+            if tmp_size >= original_bytes:
+                tmp_path.unlink(missing_ok=True)
+                _emit_progress(
+                    on_progress,
+                    100,
+                    "Este pliego ya está optimizado; no se puede reducir más sin perder calidad.",
+                )
+                return OperationResult(
+                    tool=ToolType.COMPRESS,
+                    output_files=[path],
+                    original_size_bytes=original_bytes,
+                    final_size_bytes=original_bytes,
+                    saved_percentage=0.0,
+                    message=(
+                        f"Este pliego ya está optimizado; no se puede reducir más sin perder calidad "
+                        f"(De {_format_size_es(original_bytes)} a {_format_size_es(original_bytes)}, -0%)."
+                    ),
+                )
+
+            PDFEngine._verify_compressed_pdf_integrity(tmp_path, orig_meta)
+            _check_cancel(is_cancelled)
+
+            try:
+                shutil.move(str(tmp_path), str(safe_dest))
+            except PermissionError as exc:
+                raise PDFStudioError(
+                    f"El archivo de destino '{safe_dest.name}' está bloqueado por otro programa."
+                ) from exc
+            except OSError as exc:
+                raise PDFStudioError(
+                    f"No se pudo guardar '{safe_dest.name}': espacio insuficiente en disco o error de escritura."
+                ) from exc
         except Exception:
-            doc.close()
+            if not doc.is_closed:
+                doc.close()
             tmp_path.unlink(missing_ok=True)
             raise
 
@@ -554,6 +1121,11 @@ class PDFEngine:
         )
         _emit_progress(on_progress, 100, "Compresión finalizada.")
 
+        sig_notice = (
+            " (Nota: la firma digital previa quedó invalidada al recomprimir)"
+            if has_sig
+            else ""
+        )
         return OperationResult(
             tool=ToolType.COMPRESS,
             output_files=[safe_dest],
@@ -561,8 +1133,8 @@ class PDFEngine:
             final_size_bytes=final_bytes,
             saved_percentage=round(saved_pct, 2),
             message=(
-                f"Archivo comprimido ({saved_pct:.1f}% reducido, "
-                f"{final_bytes / 1024:.1f} KB finales)."
+                f"De {_format_size_es(original_bytes)} a {_format_size_es(final_bytes)} "
+                f"(-{saved_pct:.0f}%){sig_notice}"
             ),
         )
 
