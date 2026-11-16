@@ -1407,6 +1407,64 @@ def test_pentium_lazy_cold_start_and_60_page_organizer_memory(
     window.close()
 
 
+def test_page_organizer_drag_drop_no_reference_error(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Verifica que al soltar una tarjeta en Organizar Páginas tras reordenar no lance ReferenceError: organizerRoot is not defined."""
+    from PySide6.QtCore import QPointF, QtMsgType, qInstallMessageHandler
+
+    qt_msgs: list[str] = []
+
+    def _capture(mode, _ctx, msg):
+        if mode in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+            qt_msgs.append(msg)
+
+    old_handler = qInstallMessageHandler(_capture)
+    try:
+        store = OperationHistoryStore(storage_path=tmp_path / "org_dnd_hist.json")
+        app_wrapper = CoquetteQuickApp(history_store=store)
+        window = app_wrapper.load_main_qml()
+        bridge = app_wrapper.studio_bridge
+        qtbot.waitExposed(window)
+
+        bridge.addSingleFilePath(str(sample_pdf_5p))
+        bridge.selectTool("organize")
+        qtbot.wait(80)
+
+        org_view = window.findChild(QQuickItem, "pageOrganizerView")
+        card_0 = (_collect_items_by_prefix(window.contentItem(), "organizerPageDelegate_0") or [None])[0]
+        card_1 = (_collect_items_by_prefix(window.contentItem(), "organizerPageDelegate_1") or [None])[0]
+        assert org_view is not None and card_0 is not None and card_1 is not None
+
+        p0 = card_0.mapToScene(QPointF(card_0.width() / 2.0, card_0.height() * 0.65)).toPoint()
+        p1 = card_1.mapToScene(QPointF(card_1.width() / 2.0, card_1.height() * 0.65)).toPoint()
+
+        # Preseleccionar tarjeta 0 para que al presionar no se reconstruya el modelo antes de soltar
+        bridge.selectOrganizerPage(0, False, False)
+        qtbot.wait(40)
+
+        qtbot.mousePress(window, Qt.MouseButton.LeftButton, pos=p0)
+        qtbot.wait(20)
+        assert org_view.property("draggedPageIndex") == 0
+
+        # Simular destino sobre la tarjeta 1 y soltar para disparar move_page + destrucción del delegado durante onReleased
+        org_view.setProperty("dropTargetIndex", 1)
+        qtbot.mouseRelease(window, Qt.MouseButton.LeftButton, pos=p0)
+        qtbot.wait(60)
+
+        assert [p["sourcePageIndex"] for p in bridge.organizerPages] == [1, 0, 2, 3, 4]
+        assert org_view.property("isDraggingCard") is False
+        assert org_view.property("draggedPageIndex") == -1
+        assert org_view.property("dropTargetIndex") == -1
+        assert not any("ReferenceError" in m or "organizerRoot" in m for m in qt_msgs), (
+            f"Errores QML detectados al soltar tarjeta: {qt_msgs}"
+        )
+        window.close()
+    finally:
+        qInstallMessageHandler(old_handler)
+
+
+
 
 
 

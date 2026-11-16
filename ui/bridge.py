@@ -1130,6 +1130,7 @@ class StudioBridge(QObject):
         if not (0 <= item_index < len(self._organizer_pages)):
             return
 
+        changed = False
         if shift_pressed:
             selected_indices = [
                 i for i, p in enumerate(self._organizer_pages) if p["selected"]
@@ -1137,16 +1138,23 @@ class StudioBridge(QObject):
             anchor = selected_indices[0] if selected_indices else 0
             low, high = min(anchor, item_index), max(anchor, item_index)
             for idx in range(low, high + 1):
-                self._organizer_pages[idx]["selected"] = True
+                if not self._organizer_pages[idx]["selected"]:
+                    self._organizer_pages[idx]["selected"] = True
+                    changed = True
         elif ctrl_pressed:
             self._organizer_pages[item_index]["selected"] = not bool(
                 self._organizer_pages[item_index]["selected"]
             )
+            changed = True
         else:
             for idx, page in enumerate(self._organizer_pages):
-                page["selected"] = idx == item_index
+                target_sel = idx == item_index
+                if bool(page["selected"]) != target_sel:
+                    page["selected"] = target_sel
+                    changed = True
 
-        self.pagesChanged.emit()
+        if changed:
+            self.pagesChanged.emit()
 
     @Slot()
     def rotateSelectedPages(self) -> None:

@@ -215,14 +215,17 @@ Item {
                         }
 
                         onReleased: function(mouse) {
-                            var fromIdx = organizerRoot.draggedPageIndex
-                            var targetIdx = organizerRoot.dropTargetIndex
+                            var root = organizerRoot
+                            var bridge = studioBridge
+                            var card = pageCard
+                            var fromIdx = root.draggedPageIndex
+                            var targetIdx = root.dropTargetIndex
 
                             if (targetIdx < 0 || targetIdx === fromIdx) {
                                 var ptInGrid = delegateItem.mapToItem(
                                     pagesGrid.contentItem,
-                                    pageCard.x + pageCard.width / 2,
-                                    pageCard.y + pageCard.height / 2
+                                    card.x + card.width / 2,
+                                    card.y + card.height / 2
                                 )
                                 var resolvedIdx = pagesGrid.indexAt(ptInGrid.x, ptInGrid.y)
                                 if (resolvedIdx >= 0) {
@@ -230,15 +233,18 @@ Item {
                                 }
                             }
 
-                            pageCard.Drag.drop()
-                            pageCard.x = 0
-                            pageCard.y = 0
-                            organizerRoot.isDraggingCard = false
-                            organizerRoot.draggedPageIndex = -1
-                            organizerRoot.dropTargetIndex = -1
+                            card.Drag.drop()
+                            var handledByDrop = (root.draggedPageIndex < 0)
+                            if (card) {
+                                card.x = 0
+                                card.y = 0
+                            }
+                            root.isDraggingCard = false
+                            root.draggedPageIndex = -1
+                            root.dropTargetIndex = -1
 
-                            if (fromIdx >= 0 && targetIdx >= 0 && fromIdx !== targetIdx) {
-                                studioBridge.move_page(fromIdx, targetIdx)
+                            if (!handledByDrop && fromIdx >= 0 && targetIdx >= 0 && fromIdx !== targetIdx) {
+                                bridge.move_page(fromIdx, targetIdx)
                             }
                         }
 
