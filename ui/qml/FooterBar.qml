@@ -23,9 +23,9 @@ Rectangle {
 
     RowLayout {
         anchors.fill: parent
-        anchors.leftMargin: 18
-        anchors.rightMargin: 18
-        spacing: 14
+        anchors.leftMargin: 14
+        anchors.rightMargin: 14
+        spacing: 10
 
         // =====================================================================
         // IZQUIERDA: "Guardar en: [ruta] [Elegir...]"
@@ -35,7 +35,8 @@ Rectangle {
             objectName: "folderPickerSection"
             spacing: 8
             Layout.alignment: Qt.AlignVCenter
-            Layout.maximumWidth: Math.max(260, Math.floor(footerRoot.width * 0.38))
+            Layout.preferredWidth: implicitWidth
+            Layout.maximumWidth: implicitWidth
 
             Text {
                 text: "Guardar en:"
@@ -48,7 +49,9 @@ Rectangle {
             Rectangle {
                 id: outputFolderDisplayBox
                 objectName: "outputFolderDisplayBox"
-                Layout.preferredWidth: Math.max(120, Math.min(220, Math.floor(footerRoot.width * 0.20)))
+                Layout.preferredWidth: quickActionsRow.visible
+                                       ? Math.max(104, Math.min(170, Math.floor(footerRoot.width * 0.14)))
+                                       : Math.max(130, Math.min(220, Math.floor(footerRoot.width * 0.20)))
                 Layout.preferredHeight: 34
                 radius: 8
                 color: studioBridge.isOutputDirectoryValid ? "#FAF3F2" : Theme.errorBg
@@ -87,8 +90,10 @@ Rectangle {
             PillButton {
                 id: chooseOutputFolderButton
                 objectName: "chooseOutputFolderButton"
-                height: 34
-                horizontalPadding: 14
+                height: 32
+                minWidth: 0
+                horizontalPadding: 11
+                fontPixelSize: 12
                 text: "Elegir..."
                 primaryStyle: false
                 solidShadow: false
@@ -101,6 +106,8 @@ Rectangle {
         // =====================================================================
         Item {
             id: centerStatusContainer
+            objectName: "centerStatusContainer"
+            clip: true
             Layout.fillWidth: true
             Layout.fillHeight: true
 
@@ -200,7 +207,7 @@ Rectangle {
             }
 
             // 3. Vista de operación completada con éxito ("Original intacto ✓", "Abrir archivo", "Mostrar en carpeta")
-            RowLayout {
+            Row {
                 id: quickActionsRow
                 objectName: "quickActionsRow"
                 visible: !studioBridge.isBusy && !studioBridge.hasProcessingError && studioBridge.isOutputDirectoryValid && studioBridge.lastOutputFile.length > 0
@@ -208,9 +215,11 @@ Rectangle {
                 spacing: 6
 
                 Rectangle {
+                    id: originalIntactBadge
                     objectName: "originalIntactBadge"
+                    anchors.verticalCenter: parent.verticalCenter
                     height: 28
-                    width: intactText.implicitWidth + 16
+                    width: intactText.implicitWidth + 14
                     radius: 14
                     color: "#EDF5EE"
                     border.width: 1
@@ -219,7 +228,7 @@ Rectangle {
                     Text {
                         id: intactText
                         anchors.centerIn: parent
-                        text: "Original intacto ✓"
+                        text: centerStatusContainer.width < 340 ? "✓ Intacto" : "Original intacto ✓"
                         font.family: Theme.sansFont
                         font.pixelSize: 11
                         color: "#2F5233"
@@ -228,8 +237,11 @@ Rectangle {
 
                 PillButton {
                     objectName: "footerOpenFileBtn"
+                    anchors.verticalCenter: parent.verticalCenter
                     height: 30
-                    horizontalPadding: 12
+                    minWidth: 0
+                    horizontalPadding: 10
+                    fontPixelSize: 12
                     text: "Abrir archivo"
                     primaryStyle: false
                     solidShadow: false
@@ -238,8 +250,11 @@ Rectangle {
 
                 PillButton {
                     objectName: "footerShowFolderBtn"
+                    anchors.verticalCenter: parent.verticalCenter
                     height: 30
-                    horizontalPadding: 12
+                    minWidth: 0
+                    horizontalPadding: 10
+                    fontPixelSize: 12
                     text: "Mostrar en carpeta"
                     primaryStyle: false
                     solidShadow: false
@@ -270,8 +285,9 @@ Rectangle {
             id: mainCtaButton
             objectName: "mainCtaButton"
             Layout.alignment: Qt.AlignVCenter
+            Layout.preferredWidth: implicitWidth
             height: 40
-            horizontalPadding: 22
+            horizontalPadding: 18
             text: studioBridge.primaryCtaText
             primaryStyle: true
             solidShadow: true

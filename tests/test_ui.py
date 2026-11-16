@@ -1249,6 +1249,98 @@ def test_bloque5_ui_dynamic_compression_estimates_and_cache(
     window.close()
 
 
+def test_footer_bar_no_overlap_on_completion_at_900_and_880(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Verifica que al completar una acción ('Original intacto ✓', 'Abrir archivo', 'Mostrar en carpeta'), ningún elemento del footer se solape ni desborde a 900 px y 880 px."""
+    from PySide6.QtCore import QPointF
+
+    out_dir = tmp_path / "descargas"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    store = OperationHistoryStore(storage_path=tmp_path / "footer_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.setOutputDirectory(str(out_dir))
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.selectTool("compress")
+    qtbot.waitUntil(lambda: not bridge.isEstimatingCompression, timeout=5000)
+
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000):
+        bridge.executeActiveOperation()
+    qtbot.wait(50)
+
+    footer_bar = window.findChild(QQuickItem, "footerBar")
+    folder_section = window.findChild(QQuickItem, "folderPickerSection")
+    folder_box = window.findChild(QQuickItem, "outputFolderDisplayBox")
+    choose_btn = window.findChild(QQuickItem, "chooseOutputFolderButton")
+    center_box = window.findChild(QQuickItem, "centerStatusContainer")
+    quick_row = window.findChild(QQuickItem, "quickActionsRow")
+    intact_badge = window.findChild(QQuickItem, "originalIntactBadge")
+    open_btn = window.findChild(QQuickItem, "footerOpenFileBtn")
+    show_btn = window.findChild(QQuickItem, "footerShowFolderBtn")
+    cta_btn = window.findChild(QQuickItem, "mainCtaButton")
+
+    assert all(
+        item is not None
+        for item in (
+            footer_bar,
+            folder_section,
+            folder_box,
+            choose_btn,
+            center_box,
+            quick_row,
+            intact_badge,
+            open_btn,
+            show_btn,
+            cta_btn,
+        )
+    )
+    assert quick_row.isVisible() is True
+
+    def _x_span(item: QQuickItem) -> tuple[float, float]:
+        tl = item.mapToItem(footer_bar, QPointF(0.0, 0.0))
+        return tl.x(), tl.x() + item.width()
+
+    for win_w, win_h in ((900, 640), (880, 520)):
+        window.setWidth(win_w)
+        window.setHeight(win_h)
+        qtbot.wait(60)
+
+        fw = footer_bar.width()
+        fs_l, fs_r = _x_span(folder_section)
+        ch_l, ch_r = _x_span(choose_btn)
+        cb_l, cb_r = _x_span(center_box)
+        qr_l, qr_r = _x_span(quick_row)
+        cta_l, cta_r = _x_span(cta_btn)
+
+        # Ningún hijo desborda su sección ni el footerBar
+        assert fs_l >= 0.0
+        assert ch_r <= fs_r + 1.0, f"'Elegir...' desborda folderPickerSection a {win_w}px: {ch_r} > {fs_r}"
+        assert qr_l >= cb_l - 1.0 and qr_r <= cb_r + 1.0, (
+            f"quickActionsRow desborda centerStatusContainer a {win_w}px: "
+            f"[{qr_l:.1f}, {qr_r:.1f}] vs [{cb_l:.1f}, {cb_r:.1f}]"
+        )
+        assert cta_r <= fw + 1.0
+
+        # Sin solapamientos horizontales entre sección izquierda, fila central y CTA derecho
+        assert ch_r <= qr_l + 0.5, f"'Elegir...' solapa quickActionsRow a {win_w}px: {ch_r} > {qr_l}"
+        assert qr_r <= cta_l + 0.5, f"quickActionsRow solapa CTA a {win_w}px: {qr_r} > {cta_l}"
+
+        # Hijos internos de quickActionsRow tampoco se solapan entre sí
+        in_l, in_r = _x_span(intact_badge)
+        op_l, op_r = _x_span(open_btn)
+        sh_l, sh_r = _x_span(show_btn)
+        assert in_r <= op_l + 0.5
+        assert op_r <= sh_l + 0.5
+
+    window.close()
+
+
+
 
 
 

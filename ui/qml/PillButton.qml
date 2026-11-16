@@ -9,6 +9,8 @@ FocusScope {
     property bool enabledButton: true
     property bool solidShadow: primaryStyle
     property int horizontalPadding: 18
+    property int minWidth: 104
+    property int fontPixelSize: Theme.fontBodySize
     property bool hoveredState: hoverHandler.hovered
     property bool pressedState: tapHandler.pressed
     property string disabledHint: ""
@@ -20,7 +22,7 @@ FocusScope {
     ToolTip.text: disabledHint
     ToolTip.delay: 250
 
-    implicitWidth: Math.max(104, Math.ceil(labelItem.implicitWidth) + horizontalPadding * 2)
+    implicitWidth: Math.max(minWidth, Math.ceil(labelItem.implicitWidth) + horizontalPadding * 2)
     implicitHeight: 38
 
     Keys.onReturnPressed: {
@@ -92,7 +94,7 @@ FocusScope {
             elide: Text.ElideRight
             text: pillRoot.text
             font.family: Theme.sansFont
-            font.pixelSize: Theme.fontBodySize
+            font.pixelSize: pillRoot.fontPixelSize
             font.bold: pillRoot.primaryStyle
             color: !pillRoot.enabledButton
                    ? "#8A6D75"
