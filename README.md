@@ -1,4 +1,6 @@
-# Mesa de Trabajo Floral — Editor de PDFs para Windows
+# Mesa de Trabajo Floral — Herramientas de PDFs para Windows
+
+Mesa de Trabajo Floral - Copyright (C) 2026 Samuel Garduño Gamboa
 
 Una aplicación de escritorio sencilla, rápida y **100% sin conexión a internet** para trabajar con tus documentos PDF e imágenes en Windows 10 y Windows 11.
 
