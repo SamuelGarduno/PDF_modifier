@@ -4,7 +4,8 @@ Una aplicación de escritorio sencilla, rápida y **100% sin conexión a interne
 
 Tus archivos **nunca se suben a ningún servidor** ni se modifican los originales: todo ocurre dentro de tu propia computadora.
 
-![Vista principal de Mesa de Trabajo Floral](docs/screenshots/inicio.png)
+<img width="899" height="638" alt="image" src="https://github.com/user-attachments/assets/4f72e043-529f-43aa-8959-5c52557dec00" />
+
 
 ---
 
@@ -42,7 +43,6 @@ A partir de ese momento, el programa abrirá directamente sin volver a preguntar
 
 ## Herramientas incluidas
 
-![Pantalla de herramientas de Mesa de Trabajo Floral](docs/screenshots/herramientas.png)
 
 - **Unir PDF:** Junta varios documentos PDF en un solo archivo ordenado. Si mezclas PDFs con imágenes (`PNG`, `JPG`, `WEBP`), los integra todos en un único PDF.
 - **Organizar Páginas:** Mira todas las hojas en miniatura para reordenarlas arrastrando, rotarlas 90°, duplicarlas o eliminar las que no necesites.
