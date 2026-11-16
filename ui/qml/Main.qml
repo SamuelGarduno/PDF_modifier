@@ -119,6 +119,8 @@ Window {
             height: parent.height
             anchors.left: parent.left
             z: 5
+            layer.enabled: true
+            layer.smooth: true
             onPaint: {
                 var ctx = getContext("2d")
                 ctx.reset()
@@ -410,6 +412,8 @@ Window {
                         sourceSize.height: cornerSize * 2
                         source: "../../assets/icons/botanical_corner.svg"
                         fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                        cache: true
                         smooth: true
                         opacity: 0.22
                         x: modelData.sx > 0 ? cornerMargin : parent.width - cornerSize - cornerMargin

@@ -22,6 +22,8 @@ Item {
         id: paperLinesCanvas
         objectName: "paperLinesCanvas"
         anchors.fill: parent
+        layer.enabled: true
+        layer.smooth: true
 
         onPaint: {
             var ctx = getContext("2d")

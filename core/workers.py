@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable
+import os
 from pathlib import Path
 import threading
 from typing import Any
@@ -12,9 +13,11 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
 from core.exceptions import PDFStudioError, TaskCancelledError
 from core.models import OperationResult
-from core.pdf_engine import DEFAULT_THUMBNAIL_DPI, PDFEngine
 
-MAX_CACHED_THUMBNAILS = 80
+DEFAULT_THUMBNAIL_DPI = 72
+DEFAULT_MAX_WORKERS = min(2, os.cpu_count() or 1)
+MAX_CACHED_THUMBNAILS = 48
+MAX_CACHE_BYTES = 16 * 1024 * 1024  # 16 MB máx. en RAM para miniaturas/páginas
 
 
 class WorkerSignals(QObject):
@@ -113,6 +116,8 @@ class ThumbnailRenderWorker(QRunnable):
                 return
 
         try:
+            from core.pdf_engine import PDFEngine
+
             png_bytes = PDFEngine.render_page_png_bytes(
                 self.file_path,
                 self.page_index,
@@ -127,12 +132,23 @@ class ThumbnailRenderWorker(QRunnable):
 
 
 class ThumbnailLRUCache:
-    """Caché LRU thread-safe acotada para mantener el uso de RAM bajo control (<300 MB en >200 páginas)."""
+    """Caché LRU thread-safe acotada por cantidad y por bytes para equipos con RAM limitada."""
 
-    def __init__(self, max_entries: int = MAX_CACHED_THUMBNAILS) -> None:
+    def __init__(
+        self,
+        max_entries: int = MAX_CACHED_THUMBNAILS,
+        max_bytes: int = MAX_CACHE_BYTES,
+    ) -> None:
         self.max_entries = max(8, max_entries)
+        self.max_bytes = max(1024, max_bytes)
         self._store: OrderedDict[tuple[str, int, int], bytes] = OrderedDict()
+        self._current_bytes: int = 0
         self._lock = threading.Lock()
+
+    @property
+    def total_bytes(self) -> int:
+        with self._lock:
+            return self._current_bytes
 
     def get(self, key: tuple[str, int, int]) -> bytes | None:
         with self._lock:
@@ -144,14 +160,20 @@ class ThumbnailLRUCache:
     def put(self, key: tuple[str, int, int], data: bytes) -> None:
         with self._lock:
             if key in self._store:
+                self._current_bytes -= len(self._store[key])
                 self._store.move_to_end(key)
             self._store[key] = data
-            while len(self._store) > self.max_entries:
-                self._store.popitem(last=False)
+            self._current_bytes += len(data)
+            while len(self._store) > self.max_entries or (
+                self._current_bytes > self.max_bytes and len(self._store) > 1
+            ):
+                _, evicted = self._store.popitem(last=False)
+                self._current_bytes -= len(evicted)
 
     def clear(self) -> None:
         with self._lock:
             self._store.clear()
+            self._current_bytes = 0
 
     def remove_for_file(self, resolved_file_path: str) -> None:
         with self._lock:
@@ -159,7 +181,9 @@ class ThumbnailLRUCache:
                 k for k in self._store if k[0] == resolved_file_path
             ]
             for k in keys_to_remove:
-                self._store.pop(k, None)
+                removed = self._store.pop(k, None)
+                if removed is not None:
+                    self._current_bytes -= len(removed)
 
     def __len__(self) -> int:
         with self._lock:
@@ -170,11 +194,13 @@ class AsyncTaskManager(QObject):
     """Coordinador de workers sobre QThreadPool global o dedicado."""
 
     def __init__(
-        self, parent: QObject | None = None, max_threads: int = 4
+        self,
+        parent: QObject | None = None,
+        max_threads: int = DEFAULT_MAX_WORKERS,
     ) -> None:
         super().__init__(parent)
         self.pool = QThreadPool(self)
-        self.pool.setMaxThreadCount(max_threads)
+        self.pool.setMaxThreadCount(max(1, max_threads))
         self.thumbnail_cache = ThumbnailLRUCache()
         self._active_worker: PDFOperationWorker | None = None
 

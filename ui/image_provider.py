@@ -10,8 +10,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtQuick import QQuickImageProvider
 
 from core.exceptions import PDFCorruptedError, PDFEncryptedError
-from core.pdf_engine import DEFAULT_THUMBNAIL_DPI, PDFEngine
-from core.workers import ThumbnailLRUCache
+from core.workers import DEFAULT_THUMBNAIL_DPI, ThumbnailLRUCache
 from ui.theme import ACCENT, SECONDARY, SURFACE_LIGHT
 
 
@@ -49,7 +48,7 @@ class PDFPageImageProvider(QQuickImageProvider):
             params = parse_qs(parsed.query)
             raw_path = unquote(params.get("path", [""])[0])
             dpi = int(params.get("dpi", [str(DEFAULT_THUMBNAIL_DPI)])[0])
-            dpi = max(48, min(360, dpi))
+            dpi = max(36, min(360, dpi))
 
             if not raw_path:
                 return self._create_placeholder_image("Sin documento")
@@ -63,6 +62,8 @@ class PDFPageImageProvider(QQuickImageProvider):
             png_bytes = self.cache.get(cache_key)
 
             if png_bytes is None:
+                from core.pdf_engine import PDFEngine
+
                 pwd = self._passwords.get(resolved_str)
                 try:
                     png_bytes = PDFEngine.render_page_png_bytes(

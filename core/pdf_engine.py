@@ -3,19 +3,69 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import importlib
 import io
 import math
 import os
 from pathlib import Path
 import shutil
 import tempfile
+from typing import TYPE_CHECKING, Any
 
-import pymupdf as fitz  # PyMuPDF sin warning de deprecación en Python 3.14
-from PIL import Image
-from pypdf import PdfReader, PdfWriter
-from pypdf.errors import PdfReadError, PdfStreamError
 from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen
+
+if TYPE_CHECKING:
+    import pymupdf as fitz
+    from PIL import Image
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.errors import PdfReadError, PdfStreamError
+
+
+class _LazyModule:
+    """Proxy perezoso para diferir imports pesados (pymupdf, Pillow) hasta su primer uso real."""
+
+    def __init__(self, module_name: str, global_name: str) -> None:
+        self._module_name = module_name
+        self._global_name = global_name
+
+    def _load(self) -> Any:
+        mod = importlib.import_module(self._module_name)
+        globals()[self._global_name] = mod
+        return mod
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._load(), item)
+
+
+fitz: Any = _LazyModule("pymupdf", "fitz")
+Image: Any = _LazyModule("PIL.Image", "Image")
+
+
+def _get_pypdf() -> tuple[Any, Any, Any, Any]:
+    """Carga pypdf bajo demanda y almacena sus clases/excepciones en caché global."""
+    pypdf_mod = importlib.import_module("pypdf")
+    errors_mod = importlib.import_module("pypdf.errors")
+    pdf_reader = pypdf_mod.PdfReader
+    pdf_writer = pypdf_mod.PdfWriter
+    pdf_read_err = errors_mod.PdfReadError
+    pdf_stream_err = errors_mod.PdfStreamError
+    globals().update(
+        {
+            "PdfReader": pdf_reader,
+            "PdfWriter": pdf_writer,
+            "PdfReadError": pdf_read_err,
+            "PdfStreamError": pdf_stream_err,
+        }
+    )
+    return pdf_reader, pdf_writer, pdf_read_err, pdf_stream_err
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"PdfReader", "PdfWriter", "PdfReadError", "PdfStreamError"}:
+        _get_pypdf()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 from core.exceptions import (
     InvalidPasswordError,
@@ -42,7 +92,8 @@ from core.range_parser import parse_page_ranges
 ProgressCallback = Callable[[int, str], None]
 CancelCheckCallback = Callable[[], bool]
 
-DEFAULT_THUMBNAIL_DPI = 96
+QUEUE_THUMBNAIL_DPI = 60
+DEFAULT_THUMBNAIL_DPI = 72
 HIGH_RES_RENDER_DPI = 160
 COMPRESSION_ESTIMATES: dict[CompressionLevel, float] = {
     CompressionLevel.EXTREME: 62.0,
@@ -167,6 +218,7 @@ def _open_verified_pypdf_reader(
     allow_encrypted_without_pass: bool = False,
 ) -> PdfReader:
     """Abre un PdfReader verificando corrupción y cifrado."""
+    PdfReaderCls, _, PdfReadErrorCls, PdfStreamErrorCls = _get_pypdf()
     path = Path(file_path)
     if not path.exists() or path.stat().st_size == 0:
         raise PDFCorruptedError(
@@ -174,8 +226,8 @@ def _open_verified_pypdf_reader(
         )
 
     try:
-        reader = PdfReader(str(path))
-    except (PdfReadError, PdfStreamError, ValueError, OSError) as exc:
+        reader = PdfReaderCls(str(path))
+    except (PdfReadErrorCls, PdfStreamErrorCls, ValueError, OSError) as exc:
         raise PDFCorruptedError(
             f"El archivo '{path.name}' está corrupto o no tiene formato PDF válido."
         ) from exc
@@ -746,11 +798,17 @@ class PDFEngine:
                     f"Índice de página {page_index} fuera de rango (0..{doc.page_count - 1})."
                 )
 
-            page = doc.load_page(page_index)
-            zoom = max(0.25, dpi / 72.0)
-            matrix = fitz.Matrix(zoom, zoom)
-            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-            return bytes(pixmap.tobytes("png"))
+            page = None
+            pixmap = None
+            try:
+                page = doc.load_page(page_index)
+                zoom = max(0.25, dpi / 72.0)
+                matrix = fitz.Matrix(zoom, zoom)
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                return bytes(pixmap.tobytes("png"))
+            finally:
+                del pixmap
+                del page
         finally:
             doc.close()
 
@@ -767,7 +825,8 @@ class PDFEngine:
             raise PDFStudioError("Debes proporcionar al menos un archivo PDF para unir.")
 
         passwords = passwords or {}
-        writer = PdfWriter()
+        _, PdfWriterCls, _, _ = _get_pypdf()
+        writer = PdfWriterCls()
         total_original_bytes = 0
         total_files = len(input_files)
 
@@ -826,10 +885,11 @@ class PDFEngine:
         selected_indices = parse_page_ranges(range_expr, total_pages)
         original_bytes = path.stat().st_size
 
+        _, PdfWriterCls, _, _ = _get_pypdf()
         created_files: list[Path] = []
         try:
             if not split_into_separate_files:
-                writer = PdfWriter()
+                writer = PdfWriterCls()
                 try:
                     for idx, page_idx in enumerate(selected_indices):
                         _check_cancel(is_cancelled)
@@ -854,7 +914,7 @@ class PDFEngine:
                 )
                 for idx, page_idx in enumerate(selected_indices):
                     _check_cancel(is_cancelled)
-                    writer = PdfWriter()
+                    writer = PdfWriterCls()
                     try:
                         writer.add_page(reader.pages[page_idx])
                         part_dest = base_dest.with_name(
@@ -906,7 +966,8 @@ class PDFEngine:
         max_pages = len(reader.pages)
         original_bytes = path.stat().st_size
 
-        writer = PdfWriter()
+        _, PdfWriterCls, _, _ = _get_pypdf()
+        writer = PdfWriterCls()
         try:
             for idx, item in enumerate(instructions):
                 _check_cancel(is_cancelled)
@@ -1157,7 +1218,8 @@ class PDFEngine:
         reader = _open_verified_pypdf_reader(path, password=current_password)
         original_bytes = path.stat().st_size
 
-        writer = PdfWriter()
+        _, PdfWriterCls, _, _ = _get_pypdf()
+        writer = PdfWriterCls()
         try:
             total = len(reader.pages)
             for idx, page in enumerate(reader.pages):
@@ -1208,7 +1270,8 @@ class PDFEngine:
         reader = _open_verified_pypdf_reader(path, password=password)
         original_bytes = path.stat().st_size
 
-        writer = PdfWriter()
+        _, PdfWriterCls, _, _ = _get_pypdf()
+        writer = PdfWriterCls()
         try:
             total = len(reader.pages)
             for idx, page in enumerate(reader.pages):
@@ -1272,11 +1335,17 @@ class PDFEngine:
 
             for page_idx in range(total):
                 _check_cancel(is_cancelled)
-                page = doc.load_page(page_idx)
-                pix = page.get_pixmap(matrix=matrix, alpha=False)
-                img_path = out_folder / f"{path.stem}_pag_{page_idx + 1:03d}.{ext}"
-                pix.save(str(img_path))
-                created_files.append(img_path)
+                page = None
+                pix = None
+                try:
+                    page = doc.load_page(page_idx)
+                    pix = page.get_pixmap(matrix=matrix, alpha=False)
+                    img_path = out_folder / f"{path.stem}_pag_{page_idx + 1:03d}.{ext}"
+                    pix.save(str(img_path))
+                    created_files.append(img_path)
+                finally:
+                    del pix
+                    del page
 
                 pct = int(((page_idx + 1) / total) * 100)
                 _emit_progress(
@@ -1756,14 +1825,24 @@ class PDFEngine:
                 if not (has_strokes or has_stamp or has_image):
                     continue
 
-                p_orig = orig_doc.load_page(ov.page_index)
-                p_saved = saved_doc.load_page(ov.page_index)
-                pix_orig = p_orig.get_pixmap(dpi=96, alpha=False)
-                pix_saved = p_saved.get_pixmap(dpi=96, alpha=False)
-                if pix_orig.samples == pix_saved.samples:
-                    raise PDFStudioError(
-                        f"La verificación post-guardado detectó que la página {ov.page_index + 1} no reflejó la firma."
-                    )
+                p_orig = None
+                p_saved = None
+                pix_orig = None
+                pix_saved = None
+                try:
+                    p_orig = orig_doc.load_page(ov.page_index)
+                    p_saved = saved_doc.load_page(ov.page_index)
+                    pix_orig = p_orig.get_pixmap(dpi=96, alpha=False)
+                    pix_saved = p_saved.get_pixmap(dpi=96, alpha=False)
+                    if pix_orig.samples == pix_saved.samples:
+                        raise PDFStudioError(
+                            f"La verificación post-guardado detectó que la página {ov.page_index + 1} no reflejó la firma."
+                        )
+                finally:
+                    del pix_orig
+                    del pix_saved
+                    del p_orig
+                    del p_saved
         finally:
             orig_doc.close()
             saved_doc.close()

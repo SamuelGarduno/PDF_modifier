@@ -56,7 +56,7 @@ Item {
             clip: true
             interactive: !organizerRoot.isDraggingCard
             boundsBehavior: Flickable.StopAtBounds
-            cacheBuffer: 600
+            cacheBuffer: 320
             model: studioBridge.organizerPages
 
             ScrollBar.vertical: ScrollBar {
@@ -147,6 +147,8 @@ Item {
                             anchors.centerIn: parent
                             width: parent.width - 6
                             height: parent.height - 6
+                            sourceSize.width: 124 * 2
+                            sourceSize.height: 144 * 2
                             fillMode: Image.PreserveAspectFit
                             asynchronous: true
                             cache: true

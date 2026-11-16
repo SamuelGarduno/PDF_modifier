@@ -1340,6 +1340,74 @@ def test_footer_bar_no_overlap_on_completion_at_900_and_880(
     window.close()
 
 
+def test_pentium_lazy_cold_start_and_60_page_organizer_memory(
+    tmp_path: Path, qtbot
+) -> None:
+    """Verifica arranque perezoso sin cargar pymupdf/pypdf/PIL, DPI reducido y liberación de caché tras 60 páginas."""
+    import subprocess
+    import sys
+    from tests.conftest import create_sample_pdf
+
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    probe_code = (
+        "import sys; "
+        f"sys.path.insert(0, {repo_root!r}); "
+        "from PySide6.QtGui import QGuiApplication; "
+        "from ui.main_window import CoquetteQuickApp; "
+        "app = QGuiApplication.instance() or QGuiApplication([]); "
+        "qa = CoquetteQuickApp(); "
+        "win = qa.load_main_qml(); "
+        "app.processEvents(); "
+        "loaded = [m for m in ('pymupdf', 'fitz', 'pypdf', 'PIL') if m in sys.modules]; "
+        "win.close(); "
+        "assert not loaded, f'Modulos pesados cargados en arranque: {loaded}'; "
+        "print('OK_LAZY')"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe_code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "OK_LAZY" in proc.stdout
+
+    # Probar PDF de 60 páginas: DPI=60 en cola, DPI=72 en Organizador y limpieza de caché al vaciar
+    pdf_60p = create_sample_pdf(tmp_path / "extenso_60p.pdf", num_pages=60, title_prefix="P60")
+    store = OperationHistoryStore(storage_path=tmp_path / "pentium_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(pdf_60p))
+    qtbot.wait(60)
+    assert "dpi=60" in bridge.queuedFiles[0]["thumbnailUrl"]
+
+    bridge.selectTool("organize")
+    qtbot.wait(80)
+    assert bridge.organizerPageCount == 60
+    assert "dpi=72" in bridge.organizerPages[0]["thumbnailUrl"]
+
+    # Cargar varias páginas en la caché del image_provider (acotada en entradas y bytes)
+    for page_idx in range(0, 20):
+        img = app_wrapper.image_provider.requestImage(
+            f"{page_idx}?path={pdf_60p}&dpi=72", QSize(), QSize(248, 288)
+        )
+        assert not img.isNull()
+        assert img.width() <= 248 and img.height() <= 288
+
+    assert len(app_wrapper.image_provider.cache) > 0
+    assert app_wrapper.image_provider.cache.total_bytes > 0
+
+    bridge.clearFiles()
+    qtbot.wait(40)
+    assert len(app_wrapper.image_provider.cache) == 0
+    assert app_wrapper.image_provider.cache.total_bytes == 0
+
+    window.close()
+
+
+
 
 
 

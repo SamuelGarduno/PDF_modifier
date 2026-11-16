@@ -43,10 +43,16 @@ from core.models import (
     WatermarkConfig,
     WatermarkPosition,
 )
-from core.pdf_engine import PDFEngine, ensure_safe_output_path, inspect_pdf_file
 from core.range_parser import validate_page_ranges_realtime
 from core.workers import AsyncTaskManager, PDFOperationWorker
 from ui.image_provider import PDFPageImageProvider
+
+
+def _pdf_engine_module() -> Any:
+    """Importa core.pdf_engine bajo demanda para evitar cargas pesadas en el arranque."""
+    import core.pdf_engine as pdf_engine_mod
+
+    return pdf_engine_mod
 
 SUPPORTED_PDF_EXTENSIONS: frozenset[str] = frozenset({".pdf"})
 SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
@@ -551,10 +557,11 @@ class StudioBridge(QObject):
         self._revalidate_range()
         self._schedule_compression_estimation()
         if tool_id == ToolType.COMPRESS.value:
+            pdf_engine = _pdf_engine_module().PDFEngine
             for qf in self._valid_queued_files():
                 if qf.file_path.suffix.lower() in SUPPORTED_PDF_EXTENSIONS:
                     pwd = self._passwords.get(qf.file_path.resolve())
-                    if PDFEngine.has_digital_signature(qf.file_path, password=pwd):
+                    if pdf_engine.has_digital_signature(qf.file_path, password=pwd):
                         self._emit_notice(
                             f"Aviso: '{qf.file_path.name}' contiene una firma digital criptográfica que se invalidará al comprimirlo.",
                             is_error=False,
@@ -733,7 +740,7 @@ class StudioBridge(QObject):
                 thumb_url = QUrl.fromLocalFile(str(qf.file_path.resolve())).toString()
             else:
                 encoded = quote(str(qf.file_path.resolve()))
-                thumb_url = f"image://pdfpage/0?path={encoded}&dpi=72&locked={1 if is_locked else 0}"
+                thumb_url = f"image://pdfpage/0?path={encoded}&dpi=60&locked={1 if is_locked else 0}"
 
             result.append(
                 {
@@ -831,7 +838,9 @@ class StudioBridge(QObject):
 
             try:
                 saved_pwd = self._passwords.get(resolved_path)
-                info = inspect_pdf_file(local_path, password=saved_pwd)
+                info = _pdf_engine_module().inspect_pdf_file(
+                    local_path, password=saved_pwd
+                )
                 self._queued_files.append(info)
                 existing_resolved.add(resolved_path)
                 added_any = True
@@ -930,7 +939,7 @@ class StudioBridge(QObject):
         """Desbloquea en memoria un PDF protegido cargado en la cola."""
         path = Path(file_path_str)
         try:
-            info = inspect_pdf_file(path, password=password)
+            info = _pdf_engine_module().inspect_pdf_file(path, password=password)
         except (InvalidPasswordError, PDFCorruptedError) as exc:
             self._emit_error(str(exc))
             return False
@@ -989,6 +998,9 @@ class StudioBridge(QObject):
 
     @Slot()
     def clearFiles(self) -> None:
+        if self._active_estimate_worker is not None:
+            self._active_estimate_worker.cancel()
+            self._active_estimate_worker = None
         self._queued_files.clear()
         self._organizer_pages.clear()
         self._freehand_strokes.clear()
@@ -997,6 +1009,7 @@ class StudioBridge(QObject):
         self._signature_image_path = ""
         self._signature_stamp = "APROBADO"
         self.task_manager.thumbnail_cache.clear()
+        self.image_provider.cache.clear()
         self._is_tool_selected = False
         self._has_processing_error = False
         self._schedule_compression_estimation()
@@ -1046,7 +1059,7 @@ class StudioBridge(QObject):
                     "displayPageNumber": idx + 1,
                     "rotation": 0,
                     "selected": False,
-                    "thumbnailUrl": f"image://pdfpage/{idx}?path={encoded_path}&dpi=96",
+                    "thumbnailUrl": f"image://pdfpage/{idx}?path={encoded_path}&dpi=72",
                 }
             )
         self.pagesChanged.emit()
@@ -1606,12 +1619,13 @@ class StudioBridge(QObject):
         is_cancelled: Any = None,
     ) -> dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]]:
         """Calcula la estimación real basada en muestra en un hilo QRunnable sin bloquear la UI."""
+        pdf_engine = _pdf_engine_module().PDFEngine
         results: dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]] = {}
         for cache_key, path, pwd in items:
             if is_cancelled is not None and is_cancelled():
                 raise TaskCancelledError("Cálculo de estimación cancelado.")
             try:
-                est = PDFEngine.estimate_pdf_compression_for_all_levels(
+                est = pdf_engine.estimate_pdf_compression_for_all_levels(
                     path, password=pwd, is_cancelled=is_cancelled
                 )
                 results[cache_key] = est
@@ -2078,7 +2092,7 @@ class StudioBridge(QObject):
                     pct = int(((idx + 1) / total_files) * 88)
                     on_progress(pct, f"Integrando '{path.name}' ({idx + 1}/{total_files})...")
 
-            safe_dest = ensure_safe_output_path(
+            safe_dest = _pdf_engine_module().ensure_safe_output_path(
                 Path(input_files[0]), output_path, default_suffix="_integrado"
             )
             merged_doc.save(str(safe_dest), deflate=True)
@@ -2109,6 +2123,9 @@ class StudioBridge(QObject):
         is_cancelled: Any = None,
     ) -> OperationResult:
         """Ejecuta compresión, exportación a imágenes o marca de agua sobre un lote de PDFs."""
+        pe_mod = _pdf_engine_module()
+        pdf_engine = pe_mod.PDFEngine
+        safe_path_fn = pe_mod.ensure_safe_output_path
         all_outputs: list[Path] = []
         per_file_summaries: list[str] = []
         total_orig = 0
@@ -2126,12 +2143,12 @@ class StudioBridge(QObject):
                     on_progress(overall, f"[{i + 1}/{total}] {msg}")
 
             if tool == ToolType.COMPRESS:
-                dest = ensure_safe_output_path(
+                dest = safe_path_fn(
                     pdf_path,
                     out_dir / f"{pdf_path.stem}_comprimido.pdf",
                     "_comprimido",
                 )
-                res = PDFEngine.compress_pdf(
+                res = pdf_engine.compress_pdf(
                     pdf_path,
                     dest,
                     level=compression_level,
@@ -2141,7 +2158,7 @@ class StudioBridge(QObject):
                 )
             elif tool == ToolType.PDF_TO_IMAGES:
                 subdir = out_dir / f"{pdf_path.stem}_imagenes"
-                res = PDFEngine.pdf_to_images(
+                res = pdf_engine.pdf_to_images(
                     pdf_path,
                     subdir,
                     image_format=image_format,
@@ -2150,12 +2167,12 @@ class StudioBridge(QObject):
                     is_cancelled=is_cancelled,
                 )
             else:
-                dest = ensure_safe_output_path(
+                dest = safe_path_fn(
                     pdf_path,
                     out_dir / f"{pdf_path.stem}_marca_agua.pdf",
                     "_marca_agua",
                 )
-                res = PDFEngine.apply_watermark(
+                res = pdf_engine.apply_watermark(
                     pdf_path,
                     dest,
                     watermark_config,
@@ -2201,6 +2218,9 @@ class StudioBridge(QObject):
         primary_pwd: str | None,
         out_dir: Path,
     ) -> PDFOperationWorker:
+        pe_mod = _pdf_engine_module()
+        pdf_engine = pe_mod.PDFEngine
+        safe_path_fn = pe_mod.ensure_safe_output_path
         valid_files = self._valid_queued_files()
         pdf_paths = [
             qf.file_path
@@ -2216,7 +2236,7 @@ class StudioBridge(QObject):
         if tool == ToolType.MERGE:
             all_paths = [qf.file_path for qf in valid_files]
             if img_paths and pdf_paths:
-                dest = ensure_safe_output_path(
+                dest = safe_path_fn(
                     primary_file,
                     out_dir / f"{primary_file.stem}_integrado.pdf",
                     "_integrado",
@@ -2227,11 +2247,11 @@ class StudioBridge(QObject):
                     dest,
                     passwords=dict(self._passwords),
                 )
-            dest = ensure_safe_output_path(
+            dest = safe_path_fn(
                 primary_file, out_dir / f"{primary_file.stem}_unido.pdf", "_unido"
             )
             return PDFOperationWorker(
-                PDFEngine.merge_pdfs,
+                pdf_engine.merge_pdfs,
                 pdf_paths or all_paths,
                 dest,
                 passwords=dict(self._passwords),
@@ -2239,13 +2259,13 @@ class StudioBridge(QObject):
 
         if tool == ToolType.SPLIT:
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
-            dest = ensure_safe_output_path(
+            dest = safe_path_fn(
                 target_pdf,
                 out_dir / f"{target_pdf.stem}_extraido.pdf",
                 "_extraido",
             )
             return PDFOperationWorker(
-                PDFEngine.split_pdf_by_range,
+                pdf_engine.split_pdf_by_range,
                 target_pdf,
                 dest,
                 self._range_expr,
@@ -2262,13 +2282,13 @@ class StudioBridge(QObject):
                 )
                 for p in self._organizer_pages
             ]
-            dest = ensure_safe_output_path(
+            dest = safe_path_fn(
                 target_pdf,
                 out_dir / f"{target_pdf.stem}_organizado.pdf",
                 "_organizado",
             )
             return PDFOperationWorker(
-                PDFEngine.organize_pdf,
+                pdf_engine.organize_pdf,
                 target_pdf,
                 dest,
                 instructions,
@@ -2295,13 +2315,13 @@ class StudioBridge(QObject):
 
         if tool == ToolType.COMPRESS:
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
-            dest = ensure_safe_output_path(
+            dest = safe_path_fn(
                 target_pdf,
                 out_dir / f"{target_pdf.stem}_comprimido.pdf",
                 "_comprimido",
             )
             return PDFOperationWorker(
-                PDFEngine.compress_pdf,
+                pdf_engine.compress_pdf,
                 target_pdf,
                 dest,
                 level=CompressionLevel(self._compression_level),
@@ -2312,7 +2332,7 @@ class StudioBridge(QObject):
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
             export_subdir = out_dir / f"{target_pdf.stem}_imagenes"
             return PDFOperationWorker(
-                PDFEngine.pdf_to_images,
+                pdf_engine.pdf_to_images,
                 target_pdf,
                 export_subdir,
                 image_format=ImageFormat(self._image_format),
@@ -2321,20 +2341,20 @@ class StudioBridge(QObject):
 
         if tool == ToolType.IMAGES_TO_PDF:
             target_imgs = img_paths or [qf.file_path for qf in valid_files]
-            dest = ensure_safe_output_path(
+            dest = safe_path_fn(
                 target_imgs[0],
                 out_dir / f"{target_imgs[0].stem}_album.pdf",
                 "_album",
             )
             return PDFOperationWorker(
-                PDFEngine.images_to_pdf,
+                pdf_engine.images_to_pdf,
                 target_imgs,
                 dest,
             )
 
         if tool == ToolType.WATERMARK:
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
-            dest = ensure_safe_output_path(
+            dest = safe_path_fn(
                 target_pdf,
                 out_dir / f"{target_pdf.stem}_marca_agua.pdf",
                 "_marca_agua",
@@ -2346,7 +2366,7 @@ class StudioBridge(QObject):
                 position=WatermarkPosition(self._watermark_position),
             )
             return PDFOperationWorker(
-                PDFEngine.apply_watermark,
+                pdf_engine.apply_watermark,
                 target_pdf,
                 dest,
                 wm_cfg,
@@ -2355,7 +2375,7 @@ class StudioBridge(QObject):
 
         # ToolType.SIGN
         target_pdf = pdf_paths[0] if pdf_paths else primary_file
-        dest = ensure_safe_output_path(
+        dest = safe_path_fn(
             target_pdf,
             out_dir / f"{target_pdf.stem}_firmado.pdf",
             "_firmado",
@@ -2398,7 +2418,7 @@ class StudioBridge(QObject):
                 )
             )
         return PDFOperationWorker(
-            PDFEngine.apply_signature_or_stamp,
+            pdf_engine.apply_signature_or_stamp,
             target_pdf,
             dest,
             overlays,

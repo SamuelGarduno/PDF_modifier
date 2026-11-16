@@ -177,6 +177,7 @@ Item {
         objectName: "emptyDashedFrameCanvas"
         visible: !dropzoneRoot.showQueuedState
         anchors.fill: parent
+        layer.enabled: true
         onPaint: {
             var ctx = getContext("2d")
             ctx.reset()
@@ -236,6 +237,8 @@ Item {
                 sourceSize.width: parent.width * 2
                 sourceSize.height: parent.height * 2
                 fillMode: Image.Stretch
+                asynchronous: true
+                cache: true
                 smooth: true
                 opacity: 0.72
             }
@@ -335,6 +338,7 @@ Item {
 
                 Canvas {
                     anchors.fill: parent
+                    layer.enabled: true
                     onPaint: {
                         var ctx = getContext("2d")
                         ctx.reset()
@@ -555,7 +559,7 @@ Item {
             Layout.maximumHeight: maxAvailableListHeight
             clip: true
             spacing: Theme.cardSpacing
-            cacheBuffer: 420
+            cacheBuffer: 260
             boundsBehavior: Flickable.StopAtBounds
             // Modelo local sincronizado por diferencias: una QVariantList de Python reinicia el
             // modelo entero en cada cambio y nunca dispararía las transiciones add/remove.
@@ -838,7 +842,7 @@ Item {
 
                             // Placeholder mientras carga o si está dañado
                             Column {
-                                visible: thumbImage.status !== Image.Ready || fileEntry.isCorrupted
+                                visible: thumbImage.status !== Image.Ready || Boolean(fileEntry && fileEntry.isCorrupted)
                                 anchors.centerIn: parent
                                 spacing: 3
 
@@ -855,7 +859,7 @@ Item {
                             Image {
                                 id: thumbImage
                                 objectName: "fileThumbImage_" + fileCardFocusScope.rowIndex
-                                visible: !fileEntry.isCorrupted && fileEntry.thumbnailUrl.length > 0
+                                visible: Boolean(fileEntry && !fileEntry.isCorrupted && fileEntry.thumbnailUrl && fileEntry.thumbnailUrl.length > 0)
                                 anchors.fill: parent
                                 anchors.margins: 2
                                 source: fileEntry.thumbnailUrl
@@ -924,7 +928,7 @@ Item {
 
                                 PillButton {
                                     objectName: "unlockInlineBtn_" + fileCardFocusScope.rowIndex
-                                    visible: fileEntry.isLocked
+                                    visible: Boolean(fileEntry && fileEntry.isLocked)
                                     height: 26
                                     horizontalPadding: 12
                                     text: "Abrir sello"

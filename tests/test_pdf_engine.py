@@ -699,4 +699,38 @@ def test_bloque5_compression_seven_pdfs_monotonic_and_honest_estimation(
     assert leftover_tmps == []
 
 
+def test_pentium_concurrency_and_lru_cache_byte_cap() -> None:
+    """Verifica el límite de hilos para CPU Intel Pentium (<=2) y el tope de bytes/entradas en ThumbnailLRUCache."""
+    import os
+    from PySide6.QtCore import QCoreApplication
+    from core.workers import AsyncTaskManager, DEFAULT_MAX_WORKERS, ThumbnailLRUCache
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    assert DEFAULT_MAX_WORKERS == min(2, os.cpu_count() or 1)
+    mgr = AsyncTaskManager(app)
+    assert mgr.pool.maxThreadCount() == DEFAULT_MAX_WORKERS
+    assert mgr.pool.maxThreadCount() <= 2
+
+    # Verificar desalojo por límite de entradas y límite de bytes
+    cache = ThumbnailLRUCache(max_entries=10, max_bytes=2048)
+    for idx in range(6):
+        cache.put(("doc.pdf", idx, 72), b"X" * 600)
+
+    assert len(cache) <= 3
+    assert cache.total_bytes <= 2048
+    # Las entradas más recientes permanecen
+    assert cache.get(("doc.pdf", 5, 72)) is not None
+
+    cache.remove_for_file("doc.pdf")
+    assert len(cache) == 0
+    assert cache.total_bytes == 0
+
+    cache.put(("other.pdf", 0, 72), b"Y" * 512)
+    assert cache.total_bytes == 512
+    cache.clear()
+    assert len(cache) == 0
+    assert cache.total_bytes == 0
+
+
+
 
