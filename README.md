@@ -65,7 +65,7 @@ Tus archivos **nunca se suben a ningún servidor** ni se modifican los originale
 No necesitas instalar Python ni programas adicionales:
 
 1. Entra a la página de descargas del proyecto: **[GitHub Releases — Última versión](https://github.com/SamuelGarduno/PDF_modifier/releases)**.
-2. Haz clic en el archivo descargable de la versión más reciente con el nombre **"MesaDeTrabajoFloral-Windows-x64"** (`.zip` o `.exe`).
+2. Haz clic en el archivo descargable de la versión más reciente con el nombre **"MesaDeTrabajoFloral"** (`.zip` o `.exe`).
 3. Si descargaste un `.zip`, haz clic derecho sobre él y elige **"Extraer todo..."** en la carpeta que prefieras.
 4. Abre la carpeta extraída y haz doble clic en **`MesaDeTrabajoFloral.exe`**.
 
