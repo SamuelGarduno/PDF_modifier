@@ -79,6 +79,7 @@ QtObject {
     readonly property int primaryCardRadius: 20
     readonly property int chipRadius: 18
     readonly property int actionBarHeight: 64
+    readonly property int actionBarExpandedHeight: 102
     readonly property int minTouchTarget: 32
     readonly property int thumbnailWidth: 56
     readonly property int thumbnailHeight: 72
@@ -107,6 +108,7 @@ QtObject {
     readonly property int animSlow: 220
     readonly property int animExit: 160
     readonly property int animDisplace: 180
+    readonly property int animReorder: 140
     readonly property int animStagger: 50
     readonly property int animStaggerMaxItems: 5
     // Por encima de este lote se omite el escalonado para no trabar equipos modestos
@@ -134,6 +136,7 @@ QtObject {
     readonly property real strokeMinPointDistPx: 1.5
     readonly property int signatureHandleSize: 14
     readonly property int signatureDeleteBtnSize: 18
+    readonly property int organizerDragThresholdPx: 5
 
     function toolAccentColor(toolId) {
         switch (toolId) {

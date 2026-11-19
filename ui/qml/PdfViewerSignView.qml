@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 import QtQuick.Window
+import "."
 
 Item {
     id: viewerRoot
@@ -53,9 +54,18 @@ Item {
         ctx.stroke()
     }
 
+    Shortcut {
+        id: viewerUndoShortcut
+        objectName: "viewerUndoShortcut"
+        sequences: [StandardKey.Undo]
+        enabled: viewerRoot.visible && !stampCustomTextInput.activeFocus
+        onActivated: studioBridge.undoViewerAction()
+    }
+
     Component.onCompleted: {
         syncDpr()
         signatureCanvas.requestPaint()
+        stampPreviewBox.syncStampBoxWidthToText()
     }
 
     Connections {
@@ -63,6 +73,10 @@ Item {
         function onViewerChanged() {
             viewerRoot.allStrokes = studioBridge.currentPageStrokes
             signatureCanvas.requestPaint()
+            if (!stampCustomTextInput.activeFocus && stampCustomTextInput.text !== studioBridge.signatureStamp) {
+                stampCustomTextInput.text = studioBridge.signatureStamp
+            }
+            stampPreviewBox.syncStampBoxWidthToText()
         }
     }
 
@@ -85,7 +99,7 @@ Item {
         anchors.margins: 10
         spacing: 8
 
-        // Barra de herramientas del visor: paginación, zoom, modo, grosor de trazo, sellos y PNG
+        // Barra de herramientas del visor: paginación, zoom, modo, grosor, sello libre, PNG, deshacer y restaurar
         Rectangle {
             id: viewerToolbarBox
             objectName: "viewerToolbarBox"
@@ -232,9 +246,72 @@ Item {
                     }
                 }
 
-                // 5. Selector de Sellos con opción explícita "Sin Sello"
+                // 5. Sello con texto libre editable + chips rápidos de sugerencia
                 Row {
                     spacing: 4
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Sello:"
+                        font.family: themePalette.sansFont
+                        font.pixelSize: 10
+                        font.bold: true
+                        color: themePalette.secondary
+                    }
+
+                    Rectangle {
+                        id: stampTextInputBox
+                        width: 148
+                        height: 26
+                        radius: 6
+                        color: "#FFFFFF"
+                        border.width: stampCustomTextInput.activeFocus ? 1.5 : 1
+                        border.color: stampCustomTextInput.activeFocus ? Theme.focusRingColor : themePalette.secondary
+
+                        TextInput {
+                            id: stampCustomTextInput
+                            objectName: "stampCustomTextInput"
+                            anchors.fill: parent
+                            anchors.leftMargin: 7
+                            anchors.rightMargin: 7
+                            verticalAlignment: TextInput.AlignVCenter
+                            selectByMouse: true
+                            clip: true
+                            font.family: themePalette.sansFont
+                            font.pixelSize: 11
+                            color: themePalette.backgroundDark
+                            Component.onCompleted: text = studioBridge ? studioBridge.signatureStamp : ""
+                            onActiveFocusChanged: {
+                                if (!studioBridge)
+                                    return
+                                if (activeFocus) {
+                                    studioBridge.captureViewerUndoCheckpoint()
+                                } else {
+                                    studioBridge.setSignatureStampLive(text.trim())
+                                    studioBridge.commitViewerUndoCheckpoint("stamp")
+                                    text = studioBridge.signatureStamp
+                                }
+                            }
+                            onTextEdited: {
+                                if (studioBridge)
+                                    studioBridge.setSignatureStampLive(text)
+                            }
+                            onAccepted: focus = false
+                        }
+
+                        Text {
+                            visible: stampCustomTextInput.text.length === 0 && !stampCustomTextInput.activeFocus
+                            anchors.left: parent.left
+                            anchors.leftMargin: 7
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Escribe tu sello..."
+                            font.family: themePalette.sansFont
+                            font.pixelSize: 11
+                            color: Theme.textMuted
+                            opacity: 0.7
+                        }
+                    }
+
                     Repeater {
                         model: [
                             { key: "", label: "SIN SELLO" },
@@ -244,7 +321,7 @@ Item {
                         ]
                         delegate: Rectangle {
                             objectName: "stampOption_" + (modelData.key.length > 0 ? modelData.key : "NONE")
-                            width: modelData.key === "CONFIDENCIAL" ? 86 : 68
+                            width: modelData.key === "CONFIDENCIAL" ? 84 : 64
                             height: 26
                             radius: 13
                             color: studioBridge.signatureStamp === modelData.key
@@ -266,6 +343,7 @@ Item {
 
                             TapHandler {
                                 onTapped: {
+                                    stampCustomTextInput.focus = false
                                     if (modelData.key === "" || studioBridge.signatureStamp === modelData.key) {
                                         studioBridge.clearSignatureStamp()
                                     } else {
@@ -277,24 +355,45 @@ Item {
                     }
                 }
 
-                // 6. Acciones: Firma PNG y Limpiar Trazo
+                // 6. Acciones: Firma PNG, Deshacer (Ctrl+Z), Limpiar Trazo y Restaurar original
                 Row {
                     spacing: 6
                     PillButton {
                         objectName: "pngSignatureButton"
                         height: 26
+                        minWidth: 0
                         horizontalPadding: 10
+                        fontPixelSize: 11
                         text: "Firma PNG"
                         primaryStyle: false
+                        solidShadow: false
                         onClicked: pngSignatureDialog.open()
+                    }
+
+                    PillButton {
+                        id: undoViewerButton
+                        objectName: "undoViewerButton"
+                        height: 26
+                        minWidth: 0
+                        horizontalPadding: 10
+                        fontPixelSize: 11
+                        text: "Deshacer (Ctrl+Z)"
+                        primaryStyle: false
+                        solidShadow: false
+                        enabledButton: studioBridge.canUndoViewer
+                        disabledHint: "No hay acciones para deshacer"
+                        onClicked: studioBridge.undoViewerAction()
                     }
 
                     PillButton {
                         objectName: "clearStrokesButton"
                         height: 26
+                        minWidth: 0
                         horizontalPadding: 10
+                        fontPixelSize: 11
                         text: "Limpiar Trazo"
                         primaryStyle: false
+                        solidShadow: false
                         onClicked: {
                             viewerRoot.allStrokes = []
                             viewerRoot.currentStroke = []
@@ -302,11 +401,30 @@ Item {
                             studioBridge.clearFreehandStrokes()
                         }
                     }
+
+                    PillButton {
+                        id: restoreViewerOriginalBtn
+                        objectName: "restoreViewerOriginalBtn"
+                        height: 26
+                        minWidth: 0
+                        horizontalPadding: 10
+                        fontPixelSize: 11
+                        text: "Restaurar original"
+                        primaryStyle: false
+                        solidShadow: false
+                        enabledButton: studioBridge.hasViewerChanges
+                        disabledHint: "La hoja ya está en su estado original"
+                        onClicked: {
+                            stampCustomTextInput.focus = false
+                            viewerRoot.currentStroke = []
+                            studioBridge.restoreViewerOriginal()
+                        }
+                    }
                 }
             }
         }
 
-        // Lienzo de inspección con zoom fluido; interactive se bloquea en Modo Trazar Firma o arrastrando firma PNG
+        // Lienzo de inspección con zoom fluido; interactive se bloquea al dibujar o arrastrar firma/sello
         Flickable {
             id: pageFlickable
             objectName: "viewerFlickable"
@@ -319,6 +437,8 @@ Item {
                          && !signatureMouseArea.pressed
                          && !pngDragMouseArea.pressed
                          && !pngResizeMouseArea.pressed
+                         && !stampDragMouseArea.pressed
+                         && !stampResizeMouseArea.pressed
             boundsBehavior: Flickable.StopAtBounds
 
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -349,19 +469,69 @@ Item {
                     source: studioBridge.currentViewerPageUrl
                 }
 
-                // Previsualización transparente del sello opcional (sin fondo rosado opaco ni recorte)
+                // Sello movible y redimensionable con texto libre editable (transparente al exportar)
                 Item {
                     id: stampPreviewBox
                     objectName: "stampPreviewBox"
-                    z: 4
+                    z: 5
                     visible: studioBridge.signatureStamp.length > 0
                     width: parent.width * studioBridge.signatureStampRect.width
                     height: parent.height * studioBridge.signatureStampRect.height
                     x: parent.width * studioBridge.signatureStampRect.x
                     y: parent.height * studioBridge.signatureStampRect.y
 
+                    property string lastMeasuredStampText: ""
+
+                    TextMetrics {
+                        id: stampTextMetrics
+                        font.family: themePalette.serifFont
+                        font.pixelSize: Math.max(10, Math.round(stampPreviewBox.height * 0.28))
+                        font.bold: true
+                        text: "✦ " + studioBridge.signatureStamp + " ✦"
+                    }
+
+                    function syncStampBoxWidthToText() {
+                        if (!studioBridge || paperSheet.width <= 0)
+                            return
+                        var currentStamp = studioBridge.signatureStamp
+                        if (!currentStamp || currentStamp.length === 0) {
+                            lastMeasuredStampText = ""
+                            return
+                        }
+                        if (!studioBridge.hasViewerChanges) {
+                            lastMeasuredStampText = currentStamp
+                            return
+                        }
+                        if (currentStamp === lastMeasuredStampText)
+                            return
+                        lastMeasuredStampText = currentStamp
+                        var neededPx = stampTextMetrics.advanceWidth + 28
+                        var desiredW = Math.max(0.14, Math.min(0.92, neededPx / paperSheet.width))
+                        var curRect = studioBridge.signatureStampRect
+                        if (Math.abs(desiredW - curRect.width) > 0.015) {
+                            var cx = curRect.x + curRect.width * 0.5
+                            var newX = Math.max(0.02, Math.min(0.98 - desiredW, cx - desiredW * 0.5))
+                            studioBridge.setSignatureStampRect(newX, curRect.y, desiredW, curRect.height)
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 6
+                        color: stampDragMouseArea.pressed ? "#18681D3A" : "transparent"
+                        border.width: 1
+                        border.color: Qt.rgba(0.408, 0.114, 0.227, 0.35)
+                    }
+
                     Text {
                         anchors.centerIn: parent
+                        width: Math.max(16, parent.width - 14)
+                        height: Math.max(14, parent.height - 8)
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        fontSizeMode: Text.Fit
+                        minimumPixelSize: 8
+                        elide: Text.ElideRight
                         text: "✦ " + studioBridge.signatureStamp + " ✦"
                         font.family: themePalette.serifFont
                         font.pixelSize: Math.max(10, Math.round(parent.height * 0.28))
@@ -369,14 +539,129 @@ Item {
                         color: themePalette.secondary
                     }
 
+                    // Área para arrastrar y reposicionar el sello libremente sobre la página
+                    MouseArea {
+                        id: stampDragMouseArea
+                        objectName: "stampDragMouseArea"
+                        anchors.fill: parent
+                        preventStealing: true
+                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.SizeAllCursor
+
+                        property real startMouseX: 0
+                        property real startMouseY: 0
+                        property real startBoxX: 0
+                        property real startBoxY: 0
+
+                        onPressed: function(mouse) {
+                            stampCustomTextInput.focus = false
+                            studioBridge.captureViewerUndoCheckpoint()
+                            var ptInSheet = stampDragMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                            startMouseX = ptInSheet.x
+                            startMouseY = ptInSheet.y
+                            startBoxX = stampPreviewBox.x
+                            startBoxY = stampPreviewBox.y
+                        }
+
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || paperSheet.width <= 0 || paperSheet.height <= 0)
+                                return
+                            var ptInSheet = stampDragMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                            var dx = ptInSheet.x - startMouseX
+                            var dy = ptInSheet.y - startMouseY
+                            var newX = Math.max(0, Math.min(paperSheet.width - stampPreviewBox.width, startBoxX + dx))
+                            var newY = Math.max(0, Math.min(paperSheet.height - stampPreviewBox.height, startBoxY + dy))
+                            studioBridge.setSignatureStampRect(
+                                newX / paperSheet.width,
+                                newY / paperSheet.height,
+                                stampPreviewBox.width / paperSheet.width,
+                                stampPreviewBox.height / paperSheet.height
+                            )
+                        }
+
+                        onReleased: studioBridge.commitViewerUndoCheckpoint("stamp_move")
+                        onCanceled: studioBridge.commitViewerUndoCheckpoint("stamp_move")
+                        onDoubleClicked: {
+                            stampCustomTextInput.forceActiveFocus()
+                            stampCustomTextInput.selectAll()
+                        }
+                    }
+
+                    // Esquina inferior derecha para ajustar el tamaño del marco del sello
+                    Rectangle {
+                        id: stampResizeHandle
+                        objectName: "stampResizeHandle"
+                        z: 2
+                        width: Theme.signatureHandleSize
+                        height: Theme.signatureHandleSize
+                        radius: Theme.signatureHandleSize / 2
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.margins: -5
+                        color: Theme.secondaryWine
+                        border.width: 1
+                        border.color: Theme.surfaceCard
+
+                        MouseArea {
+                            id: stampResizeMouseArea
+                            objectName: "stampResizeMouseArea"
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            preventStealing: true
+                            cursorShape: Qt.SizeFDiagCursor
+
+                            property real startMouseX: 0
+                            property real startMouseY: 0
+                            property real startWidth: 0
+                            property real startHeight: 0
+
+                            onPressed: function(mouse) {
+                                studioBridge.captureViewerUndoCheckpoint()
+                                var ptInSheet = stampResizeMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                                startMouseX = ptInSheet.x
+                                startMouseY = ptInSheet.y
+                                startWidth = stampPreviewBox.width
+                                startHeight = stampPreviewBox.height
+                            }
+
+                            onPositionChanged: function(mouse) {
+                                if (!pressed || paperSheet.width <= 0 || paperSheet.height <= 0)
+                                    return
+                                var ptInSheet = stampResizeMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
+                                var dx = ptInSheet.x - startMouseX
+                                var dy = ptInSheet.y - startMouseY
+                                var minW = Math.max(48, paperSheet.width * 0.12)
+                                var maxW = Math.max(minW, paperSheet.width - stampPreviewBox.x)
+                                var minH = Math.max(24, paperSheet.height * 0.05)
+                                var maxH = Math.max(minH, paperSheet.height - stampPreviewBox.y)
+                                var newW = Math.max(minW, Math.min(maxW, startWidth + dx))
+                                var newH = Math.max(minH, Math.min(maxH, startHeight + dy))
+                                studioBridge.setSignatureStampRect(
+                                    stampPreviewBox.x / paperSheet.width,
+                                    stampPreviewBox.y / paperSheet.height,
+                                    newW / paperSheet.width,
+                                    newH / paperSheet.height
+                                )
+                            }
+
+                            onReleased: studioBridge.commitViewerUndoCheckpoint("stamp_resize")
+                            onCanceled: studioBridge.commitViewerUndoCheckpoint("stamp_resize")
+                        }
+                    }
+
                     // Botón directo para quitar el sello desde la vista previa
                     Rectangle {
+                        objectName: "clearStampPreviewBtn"
+                        z: 2
                         width: Theme.signatureDeleteBtnSize
                         height: Theme.signatureDeleteBtnSize
                         radius: Theme.signatureDeleteBtnSize / 2
                         anchors.top: parent.top
                         anchors.right: parent.right
+                        anchors.margins: -6
                         color: themePalette.secondary
+                        border.width: 1
+                        border.color: Theme.surfaceCard
+
                         Text {
                             anchors.centerIn: parent
                             text: "✕"
@@ -384,7 +669,14 @@ Item {
                             font.bold: true
                             color: themePalette.surfaceLight
                         }
-                        TapHandler { onTapped: studioBridge.clearSignatureStamp() }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -3
+                            preventStealing: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: studioBridge.clearSignatureStamp()
+                        }
                     }
                 }
 
@@ -482,7 +774,7 @@ Item {
                 Item {
                     id: pngSignatureBox
                     objectName: "pngSignatureBox"
-                    z: 5
+                    z: 6
                     visible: studioBridge.signatureImagePath.length > 0
                     x: parent.width * studioBridge.signatureImageRect.x
                     y: parent.height * studioBridge.signatureImageRect.y
@@ -524,6 +816,7 @@ Item {
                         property real startBoxY: 0
 
                         onPressed: function(mouse) {
+                            studioBridge.captureViewerUndoCheckpoint()
                             var ptInSheet = pngDragMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
                             startMouseX = ptInSheet.x
                             startMouseY = ptInSheet.y
@@ -547,6 +840,9 @@ Item {
                                 pngSignatureBox.height / paperSheet.height
                             )
                         }
+
+                        onReleased: studioBridge.commitViewerUndoCheckpoint("image_move")
+                        onCanceled: studioBridge.commitViewerUndoCheckpoint("image_move")
                     }
 
                     // Esquina inferior derecha para cambiar tamaño manteniendo la proporción
@@ -576,6 +872,7 @@ Item {
                             property real startWidth: 0
 
                             onPressed: function(mouse) {
+                                studioBridge.captureViewerUndoCheckpoint()
                                 var ptInSheet = pngResizeMouseArea.mapToItem(paperSheet, mouse.x, mouse.y)
                                 startMouseX = ptInSheet.x
                                 startWidth = pngSignatureBox.width
@@ -603,6 +900,9 @@ Item {
                                     newH / paperSheet.height
                                 )
                             }
+
+                            onReleased: studioBridge.commitViewerUndoCheckpoint("image_resize")
+                            onCanceled: studioBridge.commitViewerUndoCheckpoint("image_resize")
                         }
                     }
 
@@ -629,8 +929,12 @@ Item {
                             color: Theme.surfaceLight
                         }
 
-                        TapHandler {
-                            onTapped: studioBridge.clearSignatureImage()
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -3
+                            preventStealing: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: studioBridge.clearSignatureImage()
                         }
                     }
                 }

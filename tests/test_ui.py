@@ -1464,6 +1464,458 @@ def test_page_organizer_drag_drop_no_reference_error(
         qInstallMessageHandler(old_handler)
 
 
+def test_app_icon_multi_resolution_and_meipass_resource_resolver(
+    tmp_path: Path, monkeypatch, qtbot
+) -> None:
+    """Verifica el ícono multi-resolución (16..256 px), su asignación a la ventana y resolve_resource_path con _MEIPASS."""
+    import sys
+    from PIL import Image
+    from ui.theme import resolve_resource_path
+
+    icon_path = resolve_resource_path("assets", "app_icon.ico")
+    assert icon_path.exists() and icon_path.stat().st_size > 1024
+
+    with Image.open(icon_path) as ico_img:
+        assert ico_img.format == "ICO"
+        ico_sizes = set(ico_img.info.get("sizes", set()))
+        for expected_dim in (16, 32, 48, 64, 128, 256):
+            assert (expected_dim, expected_dim) in ico_sizes
+
+    # Simular entorno empaquetado PyInstaller (_MEIPASS)
+    fake_meipass = tmp_path / "_internal_sim"
+    (fake_meipass / "ui" / "qml").mkdir(parents=True)
+    monkeypatch.setattr(sys, "_MEIPASS", str(fake_meipass), raising=False)
+    resolved_sim = resolve_resource_path("ui", "qml", "Main.qml")
+    assert resolved_sim == fake_meipass / "ui" / "qml" / "Main.qml"
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+
+    # Verificar que QIcon carga correctamente el ícono para QGuiApplication.setWindowIcon
+    from PySide6.QtGui import QIcon
+
+    qicon = QIcon(str(icon_path))
+    assert not qicon.isNull()
+    assert len(qicon.availableSizes()) >= 4
+
+
+def test_v11_editable_output_name_and_collision_suffix(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 1: Nombre editable en footer, sanitización Windows, reversión a sugerido y sufijo (1)."""
+    from PySide6.QtCore import QPointF
+
+    out_dir = tmp_path / "salida_v11"
+    out_dir.mkdir(parents=True)
+
+    store = OperationHistoryStore(storage_path=tmp_path / "v11_name_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.setOutputDirectory(str(out_dir))
+    qtbot.wait(50)
+
+    name_row = window.findChild(QQuickItem, "outputNameRow")
+    name_input = window.findChild(QQuickItem, "outputFileNameInput")
+    assert name_row is not None and name_row.isVisible() is True
+    assert name_input is not None
+    assert name_input.property("text") == "sample_5p_organizado"
+
+    bridge.selectTool("split")
+    bridge.setRangeExpr("1-2")
+    qtbot.wait(30)
+    assert bridge.suggestedOutputName == "sample_5p_extraido"
+    assert name_input.property("text") == "sample_5p_extraido"
+
+    # Caracteres inválidos Windows -> sanitiza y genera el archivo con nombre limpio
+    bridge.setOutputFileName('Mi:Salida*Prueba?.pdf')
+    committed = bridge.commitOutputFileName()
+    assert committed == "MiSalidaPrueba"
+    qtbot.wait(20)
+    assert name_input.property("text") == "MiSalidaPrueba"
+
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as b1:
+        bridge.executeActiveOperation()
+    first_out = Path(b1.args[1])
+    assert first_out.exists()
+    assert first_out.name == "MiSalidaPrueba.pdf"
+
+    # Ejecutar por segunda vez con el mismo nombre -> agrega sufijo incremental (1) sin sobrescribir
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as b2:
+        bridge.executeActiveOperation()
+    second_out = Path(b2.args[1])
+    assert second_out.exists()
+    assert second_out.name == "MiSalidaPrueba (1).pdf"
+    assert first_out.exists()
+
+    # Verificar layout sin desbordes ni solapamientos entre filas del FooterBar a 900x640 y 880x520
+    footer_bar = window.findChild(QQuickItem, "footerBar")
+    quick_row = window.findChild(QQuickItem, "quickActionsRow")
+    assert footer_bar is not None and quick_row is not None
+    for win_w, win_h in ((900, 640), (880, 520)):
+        window.setWidth(win_w)
+        window.setHeight(win_h)
+        qtbot.wait(50)
+        nr_tl = name_row.mapToItem(footer_bar, QPointF(0.0, 0.0))
+        qr_tl = quick_row.mapToItem(footer_bar, QPointF(0.0, 0.0))
+        assert nr_tl.y() + name_row.height() <= qr_tl.y() + 2.0
+        assert name_row.x() + name_row.width() <= footer_bar.width() + 1.0
+
+    # Dejar vacío o solo inválidos ('***') revierte automáticamente al nombre sugerido
+    bridge.setOutputFileName("***")
+    assert bridge.commitOutputFileName() == "sample_5p_extraido"
+    assert bridge.outputFileName == "sample_5p_extraido"
+
+    bridge.setOutputFileName("   ")
+    assert bridge.commitOutputFileName() == "sample_5p_extraido"
+
+    window.close()
+
+
+def test_v11_queue_reorder_lightweight_y_animation(
+    sample_pdf_5p: Path, sample_pdf_3p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 2: Transiciones move/moveDisplaced ligeras en ListView (y, 140 ms, OutQuad)."""
+    from PySide6.QtCore import QObject
+
+    store = OperationHistoryStore(storage_path=tmp_path / "v11_anim_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addFileUrls([str(sample_pdf_5p), str(sample_pdf_3p)])
+    qtbot.wait(60)
+
+    queue_list = window.findChild(QQuickItem, "queueListView")
+    assert queue_list is not None
+    assert queue_list.findChild(QObject, "queueMoveTransition") is not None
+    assert queue_list.findChild(QObject, "queueMoveDisplacedTransition") is not None
+
+    dropzone_src = (
+        Path(__file__).resolve().parent.parent / "ui" / "qml" / "DropzoneView.qml"
+    ).read_text(encoding="utf-8")
+    theme_src = (
+        Path(__file__).resolve().parent.parent / "ui" / "qml" / "Theme.qml"
+    ).read_text(encoding="utf-8")
+    assert "readonly property int animReorder: 140" in theme_src
+    assert 'properties: "y"' in dropzone_src
+    assert "duration: Theme.animReorder" in dropzone_src
+    assert "easing.type: Easing.OutQuad" in dropzone_src
+
+    card_0 = (_collect_items_by_prefix(queue_list, "queuedFileCard_0") or [None])[0]
+    assert card_0 is not None
+    assert abs(card_0.y()) < 1.0
+
+    first_name = bridge.queuedFiles[0]["name"]
+    second_name = bridge.queuedFiles[1]["name"]
+    bridge.moveFileDown(0)
+
+    # Muestrear en pasos cortos para verificar el desplazamiento animado sobre 'y'
+    observed_mid = False
+    for _ in range(8):
+        qtbot.wait(15)
+        if 0.5 < card_0.y() < 99.5:
+            observed_mid = True
+            break
+    assert observed_mid, f"No se observó transición intermedia en y (y={card_0.y()})"
+
+    # Al concluir la transición, queda exactamente en su nueva fila (88 + 12 = 100 px)
+    qtbot.wait(180)
+    assert bridge.queuedFiles[0]["name"] == second_name
+    assert bridge.queuedFiles[1]["name"] == first_name
+    assert abs(card_0.y() - 100.0) < 2.0
+
+    window.close()
+
+
+def test_v11_duplicate_icon_svg_and_organizer_buttons(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 4: Ícono explícito de duplicado (dos hojas + '+') y ToolTip 'Duplicar página'."""
+    from PySide6.QtSvg import QSvgRenderer
+
+    dup_svg = ICONS_DIR / "page_duplicate.svg"
+    assert dup_svg.exists()
+    svg_text = dup_svg.read_text(encoding="utf-8")
+    assert "<style" not in svg_text and "class=" not in svg_text
+    assert 'baseProfile="tiny"' in svg_text
+    assert QSvgRenderer(svg_text.encode("utf-8")).isValid()
+
+    store = OperationHistoryStore(storage_path=tmp_path / "v11_dup_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.selectTool("organize")
+    qtbot.wait(80)
+
+    dup_btn = (_collect_items_by_prefix(window.contentItem(), "duplicatePageBtn_0") or [None])[0]
+    dup_icon = (_collect_items_by_prefix(window.contentItem(), "duplicatePageIcon_0") or [None])[0]
+    assert dup_btn is not None and dup_icon is not None
+    assert dup_icon.property("paintedWidth") > 0
+
+    qml_src = (
+        Path(__file__).resolve().parent.parent / "ui" / "qml" / "PageOrganizerView.qml"
+    ).read_text(encoding="utf-8")
+    assert 'ToolTip.text: "Duplicar página"' in qml_src
+
+    window.close()
+
+
+def test_v11_restore_original_organizer_and_viewer_no_rerender(
+    sample_pdf_5p: Path, sample_images: list[Path], tmp_path: Path, monkeypatch, qtbot
+) -> None:
+    """Req 3: 'Restaurar original' revierte Organizador y Visor sin re-renderizar miniaturas desde disco."""
+    from core.pdf_engine import PDFEngine
+
+    store = OperationHistoryStore(storage_path=tmp_path / "v11_restore_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.selectTool("organize")
+    qtbot.wait(100)
+
+    restore_org_btn = window.findChild(QQuickItem, "restoreOrganizerOriginalBtn")
+    assert restore_org_btn is not None
+    assert bridge.hasOrganizerChanges is False
+    assert restore_org_btn.property("enabledButton") is False
+
+    # Aplicar múltiples cambios acumulativos
+    bridge.rotatePageAt(0)
+    bridge.duplicatePageAt(1)
+    bridge.deletePageAt(3)
+    bridge.move_page(0, 2)
+    qtbot.wait(40)
+    assert bridge.hasOrganizerChanges is True
+    assert restore_org_btn.property("enabledButton") is True
+
+    # Medir llamadas a render_page_png_bytes durante la restauración (debe ser 0)
+    render_calls = 0
+    orig_render = PDFEngine.render_page_png_bytes
+
+    def _counting_render(*args, **kwargs):
+        nonlocal render_calls
+        render_calls += 1
+        return orig_render(*args, **kwargs)
+
+    monkeypatch.setattr(PDFEngine, "render_page_png_bytes", staticmethod(_counting_render))
+
+    bridge.restoreOrganizerOriginal()
+    qtbot.wait(40)
+    assert render_calls == 0
+    assert bridge.hasOrganizerChanges is False
+    assert bridge.organizerPageCount == 5
+    assert [p["sourcePageIndex"] for p in bridge.organizerPages] == [0, 1, 2, 3, 4]
+    assert all(p["rotation"] == 0 for p in bridge.organizerPages)
+
+    # También en Visor y Firma: restaurar limpia trazos, sello personalizado y PNG sin re-renderizar
+    bridge.selectTool("sign")
+    qtbot.wait(80)
+    render_calls_before_viewer = render_calls
+    assert bridge.hasViewerChanges is False
+
+    bridge.addFreehandStroke([{"x": 0.15, "y": 0.25}, {"x": 0.35, "y": 0.30}])
+    bridge.setSignatureStamp("BORRADOR")
+    assert bridge.hasViewerChanges is True
+
+    bridge.restoreViewerOriginal()
+    qtbot.wait(40)
+    assert render_calls == render_calls_before_viewer
+    assert bridge.hasViewerChanges is False
+    assert bridge.freehandStrokeCount == 0
+    assert bridge.signatureStamp == "APROBADO"
+
+    window.close()
+
+
+def test_v11_organizer_direct_drag_without_preselection_and_fast_click(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 5: Arrastrar cualquier página >5 px reordena directo sin selección previa; clic rápido selecciona."""
+    from PySide6.QtCore import QPoint, QPointF
+
+    store = OperationHistoryStore(storage_path=tmp_path / "v11_drag_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.selectTool("organize")
+    qtbot.wait(100)
+
+    assert all(not p["selected"] for p in bridge.organizerPages)
+
+    card_2 = (_collect_items_by_prefix(window.contentItem(), "organizerPageDelegate_2") or [None])[0]
+    assert card_2 is not None
+    p2 = card_2.mapToScene(QPointF(card_2.width() * 0.5, card_2.height() * 0.6)).toPoint()
+
+    # 1. Clic rápido (< 5 px) selecciona normalmente
+    qtbot.mouseClick(window, Qt.MouseButton.LeftButton, pos=p2)
+    qtbot.wait(40)
+    assert bridge.organizerPages[2]["selected"] is True
+    assert [p["sourcePageIndex"] for p in bridge.organizerPages] == [0, 1, 2, 3, 4]
+
+    # 2. Presionar tarjeta 3 (NO seleccionada) y arrastrar > 5 px hasta tarjeta 0 en un solo gesto
+    card_0 = (_collect_items_by_prefix(window.contentItem(), "organizerPageDelegate_0") or [None])[0]
+    card_3 = (_collect_items_by_prefix(window.contentItem(), "organizerPageDelegate_3") or [None])[0]
+    assert card_0 is not None and card_3 is not None
+    assert bridge.organizerPages[3]["selected"] is False
+
+    start_pt = card_3.mapToScene(QPointF(card_3.width() * 0.5, card_3.height() * 0.65)).toPoint()
+    end_pt = card_0.mapToScene(QPointF(card_0.width() * 0.5, card_0.height() * 0.65)).toPoint()
+
+    qtbot.mousePress(window, Qt.MouseButton.LeftButton, pos=start_pt)
+    qtbot.wait(20)
+    # Paso intermedio > 5 px para activar drag.active
+    qtbot.mouseMove(window, pos=QPoint(start_pt.x() - 12, start_pt.y()))
+    qtbot.wait(20)
+    qtbot.mouseMove(window, pos=end_pt)
+    qtbot.wait(30)
+    qtbot.mouseRelease(window, Qt.MouseButton.LeftButton, pos=end_pt)
+    qtbot.wait(60)
+
+    assert bridge.organizerPages[0]["sourcePageIndex"] == 3
+
+    window.close()
+
+
+def test_v11_viewer_undo_stack_and_ctrl_z_shortcut(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 6: Pila undo_stack en Visor y Firma, botón Deshacer y atajo Ctrl+Z (incl. pila vacía)."""
+    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+
+    png_sig = tmp_path / "firma_undo.png"
+    img = QImage(180, 70, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(img)
+    pen = QPen(QColor(0, 0, 0, 255))
+    pen.setWidth(6)
+    painter.setPen(pen)
+    painter.drawLine(15, 35, 165, 35)
+    painter.end()
+    assert img.save(str(png_sig), "PNG")
+
+    store = OperationHistoryStore(storage_path=tmp_path / "v11_undo_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.selectTool("sign")
+    qtbot.wait(80)
+
+    undo_btn = window.findChild(QQuickItem, "undoViewerButton")
+    assert undo_btn is not None
+
+    # Pila vacía: Ctrl+Z o undoViewerAction() no genera error
+    assert bridge.canUndoViewer is False
+    assert undo_btn.property("enabledButton") is False
+    assert bridge.undoViewerAction() is False
+    qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    qtbot.wait(20)
+    assert bridge.signatureStamp == "APROBADO"
+
+    # 1. Trazo, 2. Sello libre, 3. Firma PNG
+    bridge.addFreehandStroke([{"x": 0.12, "y": 0.20}, {"x": 0.30, "y": 0.25}])
+    bridge.setSignatureStamp("Pagado — Folio 9")
+    bridge.setSignatureImagePath(str(png_sig))
+    qtbot.wait(40)
+
+    assert bridge.canUndoViewer is True
+    assert bridge.viewerUndoCount == 3
+    assert undo_btn.property("enabledButton") is True
+
+    # Ctrl+Z #1 -> quita firma PNG
+    qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    qtbot.wait(30)
+    assert bridge.signatureImagePath == ""
+    assert bridge.signatureStamp == "Pagado — Folio 9"
+    assert bridge.freehandStrokeCount == 1
+
+    # Ctrl+Z #2 -> revierte sello al previo ("APROBADO")
+    qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    qtbot.wait(30)
+    assert bridge.signatureStamp == "APROBADO"
+    assert bridge.freehandStrokeCount == 1
+
+    # Ctrl+Z #3 -> quita trazo
+    qtbot.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    qtbot.wait(30)
+    assert bridge.freehandStrokeCount == 0
+    assert bridge.canUndoViewer is False
+
+    window.close()
+
+
+def test_v11_movable_free_text_stamp_and_pdf_export(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 7: Sellos movibles con texto libre editable, ajuste de marco y estampado en posición exacta."""
+    import pymupdf as fitz
+    from PySide6.QtGui import QImage
+
+    store = OperationHistoryStore(storage_path=tmp_path / "v11_stamp_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.setOutputDirectory(str(tmp_path))
+    bridge.selectTool("sign")
+    qtbot.wait(80)
+
+    stamp_input = window.findChild(QQuickItem, "stampCustomTextInput")
+    stamp_box = window.findChild(QQuickItem, "stampPreviewBox")
+    stamp_drag = window.findChild(QQuickItem, "stampDragMouseArea")
+    assert stamp_input is not None and stamp_box is not None and stamp_drag is not None
+
+    initial_w = bridge.signatureStampRect["width"]
+    free_label = "Revisado por Ana — 2026"
+    bridge.setSignatureStamp(free_label)
+    qtbot.wait(50)
+
+    # Respeta texto libre (sin forzar mayúsculas) y amplía el marco dinámicamente
+    assert bridge.signatureStamp == free_label
+    assert stamp_input.property("text") == free_label
+    assert bridge.signatureStampRect["width"] > initial_w
+
+    # Reposicionar sello en parte inferior izquierda (0.08, 0.72) sobre fondo blanco limpio
+    bridge.setSignatureStampRect(0.08, 0.72, 0.56, 0.14)
+    qtbot.wait(30)
+
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as blocker:
+        bridge.executeActiveOperation()
+    out_pdf = Path(blocker.args[1])
+    assert out_pdf.exists()
+
+    # Verificar en el PDF exportado que la zona del sello reubicado contiene tinta burdeos (#681D3A)
+    with fitz.open(out_pdf) as doc:
+        pix = doc[0].get_pixmap(dpi=144, alpha=False)
+        rendered = QImage.fromData(bytes(pix.tobytes("png")), "PNG")
+        wine_pixels = 0
+        for sx in range(int(rendered.width() * 0.10), int(rendered.width() * 0.62), 3):
+            for sy in range(int(rendered.height() * 0.74), int(rendered.height() * 0.84), 3):
+                c = rendered.pixelColor(sx, sy)
+                if c.red() > c.blue() and c.red() > c.green() + 15 and c.red() < 200:
+                    wine_pixels += 1
+        assert wine_pixels > 5, "El sello movible con texto libre no se estampó en la nueva posición"
+
+    window.close()
+
+
+
+
 
 
 

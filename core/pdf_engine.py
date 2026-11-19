@@ -122,13 +122,15 @@ def ensure_safe_output_path(
                 f"{resolved_input.stem}{default_suffix}{extension}"
             )
 
-    if candidate.exists() and candidate == resolved_input and not allow_overwrite:
+    if candidate.exists() and not allow_overwrite:
         counter = 1
+        suffix = candidate.suffix or extension
         while True:
-            alt = resolved_input.with_name(
-                f"{resolved_input.stem}{default_suffix}_{counter}{extension}"
+            alt = candidate.with_name(
+                f"{candidate.stem} ({counter}){suffix}"
             )
-            if not alt.exists():
+            if not alt.exists() and alt.resolve() != resolved_input:
+                alt.parent.mkdir(parents=True, exist_ok=True)
                 return alt
             counter += 1
 
@@ -1736,9 +1738,9 @@ class PDFEngine:
                 dy = iry + (irh - scaled_ext.height()) / 2.0
                 painter.drawImage(QPointF(dx, dy), scaled_ext)
 
-        # 2. Sello predefinido opcional (sin fondo rosado opaco ni borde rectangular que recorte)
+        # 2. Sello opcional con texto libre (sin fondo rosado opaco ni borde rectangular que recorte)
         if overlay.stamp_label and overlay.stamp_label.strip():
-            stamp_text = f"✦ {overlay.stamp_label.strip().upper()} ✦"
+            stamp_text = f"✦ {overlay.stamp_label.strip()} ✦"
             font = QFont("Georgia")
             font.setBold(True)
             font_px = max(12, int(rh * 0.36))

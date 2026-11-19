@@ -29,6 +29,11 @@ from core.exceptions import (
     PDFStudioError,
     TaskCancelledError,
 )
+from core.filename_utils import (
+    clean_windows_filename_stem,
+    resolve_unique_output_path,
+    sanitize_windows_filename,
+)
 from core.history import OperationHistoryStore
 from core.models import (
     STROKE_WIDTH_PT_MAP,
@@ -127,6 +132,11 @@ TOOLS_CATALOG: list[dict[str, str]] = [
 
 TOOLS_BY_ID: dict[str, dict[str, str]] = {item["id"]: item for item in TOOLS_CATALOG}
 
+MAX_VIEWER_UNDO_STEPS = 50
+DEFAULT_STAMP_RECT: tuple[float, float, float, float] = (0.60, 0.78, 0.92, 0.92)
+DEFAULT_IMAGE_RECT: tuple[float, float, float, float] = (0.375, 0.42, 0.625, 0.56)
+DEFAULT_IMAGE_ASPECT = 2.2
+
 
 
 def _format_bytes(size_bytes: int) -> str:
@@ -185,6 +195,7 @@ class StudioBridge(QObject):
 
         # Estado del Organizador de Páginas
         self._organizer_pages: list[dict[str, Any]] = []
+        self._organizer_initial_snapshot: list[dict[str, Any]] = []
 
         # Estado del Visor y Capa de Firma
         self._viewer_page_index: int = 0
@@ -196,6 +207,8 @@ class StudioBridge(QObject):
         self._signature_image_path: str = ""
         self._freehand_strokes: list[list[tuple[float, float]]] = []
         self._page_annotations: dict[int, dict[str, Any]] = {}
+        self._viewer_undo_stack: list[dict[str, Any]] = []
+        self._pending_undo_checkpoint: dict[str, Any] | None = None
         self._primary_doc_key: str = ""
 
         # Estado de los Paneles de Configuración Inferior
@@ -220,12 +233,15 @@ class StudioBridge(QObject):
         self._output_directory: str = ""
         self._output_directory_valid: bool = True
         self._output_directory_error: str = ""
+        self._custom_output_name: str = ""
+        self._output_name_user_edited: bool = False
 
         # Estado de Ejecución y Footer
         self._is_busy: bool = False
         self._progress_percent: int = 0
         self._status_message: str = "Listo para trabajar en tu escritorio de papelería."
         self._last_output_file: str = ""
+        self._last_output_file_path: str = ""
         self._last_output_folder: str = ""
 
     # --- Propiedades de Navegación Contextual ("Suelta primero, elige después") ---
@@ -502,6 +518,7 @@ class StudioBridge(QObject):
             self._has_processing_error = False
             self.activeToolChanged.emit()
             self.filesChanged.emit()
+            self.configChanged.emit()
             self.progressChanged.emit()
             self._schedule_compression_estimation()
 
@@ -512,6 +529,7 @@ class StudioBridge(QObject):
             if self._is_tool_selected:
                 self._is_tool_selected = False
             self.activeToolChanged.emit()
+            self.configChanged.emit()
             return
 
         suggestions = self.suggestedTools
@@ -528,6 +546,7 @@ class StudioBridge(QObject):
             if valid_suggested_ids and self._active_tool not in valid_suggested_ids:
                 self._active_tool = primary_id
             self.activeToolChanged.emit()
+        self.configChanged.emit()
 
     @Property(bool, notify=activeToolChanged)
     def isToolSelected(self) -> bool:
@@ -554,6 +573,7 @@ class StudioBridge(QObject):
             self._update_ready_status_message()
         if changed:
             self.activeToolChanged.emit()
+            self.configChanged.emit()
         self._revalidate_range()
         self._schedule_compression_estimation()
         if tool_id == ToolType.COMPRESS.value:
@@ -587,6 +607,7 @@ class StudioBridge(QObject):
                 self._progress_percent = 0
                 self._update_ready_status_message()
             self.activeToolChanged.emit()
+            self.configChanged.emit()
 
     @Slot(str)
     def setActiveTool(self, tool_id: str) -> None:
@@ -885,7 +906,6 @@ class StudioBridge(QObject):
                 else:
                     self._output_directory = str(self._queued_files[0].file_path.parent)
                 self._revalidate_output_directory()
-                self.configChanged.emit()
             self._rebuild_pages_from_primary_file()
             self._revalidate_range()
             self._sync_contextual_tool_after_queue_change()
@@ -893,6 +913,7 @@ class StudioBridge(QObject):
             self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
+            self.configChanged.emit()
 
     @Slot(str)
     def addSingleFilePath(self, path_str: str) -> None:
@@ -915,6 +936,7 @@ class StudioBridge(QObject):
             self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
+            self.configChanged.emit()
 
     @Slot()
     def keepOnlyImages(self) -> None:
@@ -933,6 +955,7 @@ class StudioBridge(QObject):
             self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
+            self.configChanged.emit()
 
     @Slot(str, str)
     def supplyFilePassword(self, file_path_str: str, password: str) -> bool:
@@ -957,6 +980,7 @@ class StudioBridge(QObject):
         self._schedule_compression_estimation()
         self.filesChanged.emit()
         self.activeToolChanged.emit()
+        self.configChanged.emit()
         return True
 
     @Slot(int)
@@ -971,6 +995,7 @@ class StudioBridge(QObject):
             self._schedule_compression_estimation()
             self.filesChanged.emit()
             self.activeToolChanged.emit()
+            self.configChanged.emit()
 
     @Slot(int, int)
     def moveFile(self, from_index: int, to_index: int) -> None:
@@ -985,6 +1010,7 @@ class StudioBridge(QObject):
                 self._rebuild_pages_from_primary_file()
             self._update_ready_status_message()
             self.filesChanged.emit()
+            self.configChanged.emit()
 
     @Slot(int)
     def moveFileUp(self, index: int) -> None:
@@ -1003,11 +1029,16 @@ class StudioBridge(QObject):
             self._active_estimate_worker = None
         self._queued_files.clear()
         self._organizer_pages.clear()
+        self._organizer_initial_snapshot.clear()
         self._freehand_strokes.clear()
         self._page_annotations.clear()
+        self._viewer_undo_stack.clear()
+        self._pending_undo_checkpoint = None
         self._primary_doc_key = ""
         self._signature_image_path = ""
         self._signature_stamp = "APROBADO"
+        self._custom_output_name = ""
+        self._output_name_user_edited = False
         self.task_manager.thumbnail_cache.clear()
         self.image_provider.cache.clear()
         self._is_tool_selected = False
@@ -1019,6 +1050,7 @@ class StudioBridge(QObject):
         self.pagesChanged.emit()
         self.viewerChanged.emit()
         self.activeToolChanged.emit()
+        self.configChanged.emit()
 
     # --- Organizador de Páginas (Page Organizer) ---
 
@@ -1029,14 +1061,20 @@ class StudioBridge(QObject):
 
     def _rebuild_pages_from_primary_file(self) -> None:
         self._organizer_pages.clear()
+        self._organizer_initial_snapshot.clear()
         self._viewer_page_index = 0
         valid_files = self._valid_queued_files()
         if not valid_files:
             self._page_annotations.clear()
+            self._viewer_undo_stack.clear()
+            self._pending_undo_checkpoint = None
             self._primary_doc_key = ""
+            self._custom_output_name = ""
+            self._output_name_user_edited = False
             self._sync_current_page_viewer_state()
             self.pagesChanged.emit()
             self.viewerChanged.emit()
+            self.configChanged.emit()
             return
 
         primary = valid_files[0]
@@ -1044,11 +1082,16 @@ class StudioBridge(QObject):
         if new_doc_key != self._primary_doc_key:
             self._primary_doc_key = new_doc_key
             self._page_annotations.clear()
+            self._viewer_undo_stack.clear()
+            self._pending_undo_checkpoint = None
+            self._custom_output_name = ""
+            self._output_name_user_edited = False
         self._sync_current_page_viewer_state()
 
         if primary.page_count < 1 or primary.file_path.suffix.lower() != ".pdf":
             self.pagesChanged.emit()
             self.viewerChanged.emit()
+            self.configChanged.emit()
             return
 
         encoded_path = quote(str(primary.file_path.resolve()))
@@ -1062,8 +1105,36 @@ class StudioBridge(QObject):
                     "thumbnailUrl": f"image://pdfpage/{idx}?path={encoded_path}&dpi=72",
                 }
             )
+        self._organizer_initial_snapshot = [dict(p) for p in self._organizer_pages]
         self.pagesChanged.emit()
         self.viewerChanged.emit()
+        self.configChanged.emit()
+
+    @Property(bool, notify=pagesChanged)
+    def hasOrganizerChanges(self) -> bool:
+        """Indica si el orden, rotación o cantidad de páginas difiere del estado inicial cargado."""
+        if not self._organizer_initial_snapshot:
+            return False
+        current_state = [
+            (int(p["sourcePageIndex"]), int(p["rotation"]))
+            for p in self._organizer_pages
+        ]
+        initial_state = [
+            (int(p["sourcePageIndex"]), int(p["rotation"]))
+            for p in self._organizer_initial_snapshot
+        ]
+        return current_state != initial_state
+
+    @Slot()
+    def restoreOrganizerOriginal(self) -> None:
+        """Revierte orden, rotaciones, duplicados y eliminaciones al estado inicial sin re-renderizar."""
+        if not self._organizer_initial_snapshot or not self.hasOrganizerChanges:
+            return
+        self._organizer_pages = [
+            dict(item, selected=False) for item in self._organizer_initial_snapshot
+        ]
+        self._reindex_organizer_pages()
+        self.pagesChanged.emit()
 
     @Property("QVariantList", notify=pagesChanged)
     def organizerPages(self) -> list[dict[str, Any]]:
@@ -1181,18 +1252,154 @@ class StudioBridge(QObject):
 
     # --- Visor PDF y Capa de Firma/Sellos ---
 
+    @staticmethod
+    def _default_page_annotation(page_index: int) -> dict[str, Any]:
+        return {
+            "strokes": [],
+            "stamp": "APROBADO" if page_index == 0 else "",
+            "stamp_rect": DEFAULT_STAMP_RECT,
+            "image_path": "",
+            "image_rect": DEFAULT_IMAGE_RECT,
+            "image_aspect": DEFAULT_IMAGE_ASPECT,
+        }
+
+    @staticmethod
+    def _clone_annotation(ann: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "strokes": [
+                {
+                    "points": list(s["points"]),
+                    "widthPt": float(s["widthPt"]),
+                    "widthKey": str(s["widthKey"]),
+                }
+                for s in ann.get("strokes", [])
+            ],
+            "stamp": str(ann.get("stamp", "")),
+            "stamp_rect": tuple(ann.get("stamp_rect", DEFAULT_STAMP_RECT)),
+            "image_path": str(ann.get("image_path", "")),
+            "image_rect": tuple(ann.get("image_rect", DEFAULT_IMAGE_RECT)),
+            "image_aspect": float(ann.get("image_aspect", DEFAULT_IMAGE_ASPECT)),
+        }
+
+    @staticmethod
+    def _annotations_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        return (
+            a.get("strokes") == b.get("strokes")
+            and a.get("stamp") == b.get("stamp")
+            and tuple(a.get("stamp_rect", DEFAULT_STAMP_RECT))
+            == tuple(b.get("stamp_rect", DEFAULT_STAMP_RECT))
+            and a.get("image_path") == b.get("image_path")
+            and tuple(a.get("image_rect", DEFAULT_IMAGE_RECT))
+            == tuple(b.get("image_rect", DEFAULT_IMAGE_RECT))
+        )
+
+    @staticmethod
+    def _auto_fit_stamp_rect(ann: dict[str, Any], label_text: str) -> None:
+        """Ajusta el ancho normalizado del marco del sello según la longitud del texto libre."""
+        clean_len = len(label_text.strip())
+        if clean_len == 0:
+            return
+        x0, y0, x1, y1 = ann.get("stamp_rect", DEFAULT_STAMP_RECT)
+        cur_h = max(0.06, min(0.45, float(y1) - float(y0)))
+        desired_w = max(0.18, min(0.90, 0.11 + clean_len * 0.021))
+        cx = (float(x0) + float(x1)) * 0.5
+        new_x0 = max(0.02, min(0.98 - desired_w, cx - desired_w * 0.5))
+        new_x1 = min(0.98, new_x0 + desired_w)
+        new_y1 = min(0.98, float(y0) + cur_h)
+        new_y0 = max(0.02, new_y1 - cur_h)
+        ann["stamp_rect"] = (
+            round(new_x0, 4),
+            round(new_y0, 4),
+            round(new_x1, 4),
+            round(new_y1, 4),
+        )
+
+    def _push_viewer_undo_state(
+        self,
+        page_index: int,
+        previous_state: dict[str, Any],
+        action_kind: str = "edit",
+    ) -> None:
+        self._viewer_undo_stack.append(
+            {
+                "page_index": int(page_index),
+                "state": self._clone_annotation(previous_state),
+                "kind": action_kind,
+            }
+        )
+        if len(self._viewer_undo_stack) > MAX_VIEWER_UNDO_STEPS:
+            del self._viewer_undo_stack[0]
+
     def _get_page_annotation(self, page_index: int) -> dict[str, Any]:
         """Obtiene o inicializa el estado de anotaciones (trazos, sello, firma PNG) por página."""
         if page_index not in self._page_annotations:
-            self._page_annotations[page_index] = {
-                "strokes": [],
-                "stamp": "APROBADO" if page_index == 0 else "",
-                "stamp_rect": (0.60, 0.78, 0.92, 0.92),
-                "image_path": "",
-                "image_rect": (0.375, 0.42, 0.625, 0.56),
-                "image_aspect": 2.2,
-            }
+            self._page_annotations[page_index] = self._default_page_annotation(page_index)
         return self._page_annotations[page_index]
+
+    @Property(bool, notify=viewerChanged)
+    def canUndoViewer(self) -> bool:
+        return len(self._viewer_undo_stack) > 0
+
+    @Property(int, notify=viewerChanged)
+    def viewerUndoCount(self) -> int:
+        return len(self._viewer_undo_stack)
+
+    @Property(bool, notify=viewerChanged)
+    def hasViewerChanges(self) -> bool:
+        if self._viewer_undo_stack:
+            return True
+        for p_idx, ann in self._page_annotations.items():
+            if not self._annotations_equal(ann, self._default_page_annotation(p_idx)):
+                return True
+        return False
+
+    @Slot()
+    def captureViewerUndoCheckpoint(self) -> None:
+        """Guarda instantánea previa antes de iniciar arrastre o edición continua."""
+        ann = self._get_page_annotation(self._viewer_page_index)
+        self._pending_undo_checkpoint = {
+            "page_index": self._viewer_page_index,
+            "state": self._clone_annotation(ann),
+        }
+
+    @Slot(str)
+    def commitViewerUndoCheckpoint(self, action_kind: str = "edit") -> None:
+        """Apila el checkpoint previo si el estado actual cambió tras finalizar el gesto."""
+        cp = self._pending_undo_checkpoint
+        self._pending_undo_checkpoint = None
+        if cp is None:
+            return
+        p_idx = int(cp["page_index"])
+        prev_state = cp["state"]
+        curr_state = self._get_page_annotation(p_idx)
+        if not self._annotations_equal(prev_state, curr_state):
+            self._push_viewer_undo_state(p_idx, prev_state, action_kind=action_kind)
+            self.viewerChanged.emit()
+
+    @Slot(result=bool)
+    def undoViewerAction(self) -> bool:
+        """Deshace la última acción en Visor y Firma (trazo, sello, firma PNG o movimiento)."""
+        self._pending_undo_checkpoint = None
+        if not self._viewer_undo_stack:
+            return False
+        entry = self._viewer_undo_stack.pop()
+        p_idx = int(entry["page_index"])
+        self._page_annotations[p_idx] = self._clone_annotation(entry["state"])
+        self._viewer_page_index = p_idx
+        self._sync_current_page_viewer_state()
+        self.viewerChanged.emit()
+        return True
+
+    @Slot()
+    def restoreViewerOriginal(self) -> None:
+        """Revierte todas las anotaciones del visor al estado inicial sin re-renderizar."""
+        if not self.hasViewerChanges and not self._pending_undo_checkpoint:
+            return
+        self._page_annotations.clear()
+        self._viewer_undo_stack.clear()
+        self._pending_undo_checkpoint = None
+        self._sync_current_page_viewer_state()
+        self.viewerChanged.emit()
 
     def _sync_current_page_viewer_state(self) -> None:
         """Sincroniza los atributos rápidos de la página activa con el estado por página."""
@@ -1326,13 +1533,29 @@ class StudioBridge(QObject):
         cleaned = "" if label.strip().upper() in {"", "SIN SELLO", "NINGUNO"} else label.strip()
         ann = self._get_page_annotation(self._viewer_page_index)
         if cleaned != ann["stamp"] or cleaned != self._signature_stamp:
+            self._push_viewer_undo_state(self._viewer_page_index, ann, action_kind="stamp")
             ann["stamp"] = cleaned
+            if cleaned:
+                self._auto_fit_stamp_rect(ann, cleaned)
             self._signature_stamp = cleaned
+            self.viewerChanged.emit()
+
+    @Slot(str)
+    def setSignatureStampLive(self, label: str) -> None:
+        """Actualiza el texto libre del sello en tiempo real sin apilar undo por cada tecla."""
+        raw = str(label)
+        next_val = "" if not raw.strip() else raw
+        ann = self._get_page_annotation(self._viewer_page_index)
+        if next_val != ann["stamp"] or next_val != self._signature_stamp:
+            ann["stamp"] = next_val
+            if next_val.strip():
+                self._auto_fit_stamp_rect(ann, next_val)
+            self._signature_stamp = next_val
             self.viewerChanged.emit()
 
     @Slot()
     def clearSignatureStamp(self) -> None:
-        """Desactiva y oculta cualquier sello predefinido dejando solo la firma."""
+        """Desactiva y oculta cualquier sello dejando solo la firma."""
         self.setSignatureStamp("")
 
     @Property("QVariantMap", notify=viewerChanged)
@@ -1402,6 +1625,9 @@ class StudioBridge(QObject):
         """Quita la imagen PNG de firma de la página actual."""
         ann = self._get_page_annotation(self._viewer_page_index)
         if ann["image_path"] or self._signature_image_path:
+            self._push_viewer_undo_state(
+                self._viewer_page_index, ann, action_kind="image_remove"
+            )
             ann["image_path"] = ""
             self._signature_image_path = ""
             self.viewerChanged.emit()
@@ -1500,6 +1726,7 @@ class StudioBridge(QObject):
         y1 = round(min(1.0, y0 + norm_h), 4)
 
         ann = self._get_page_annotation(self._viewer_page_index)
+        self._push_viewer_undo_state(self._viewer_page_index, ann, action_kind="image_add")
         ann["image_path"] = str(effective_path)
         ann["image_rect"] = (x0, y0, x1, y1)
         ann["image_aspect"] = round(img_aspect, 4)
@@ -1532,6 +1759,9 @@ class StudioBridge(QObject):
                 stroke.append((float(pt[0]), float(pt[1])))
         if len(stroke) >= 2:
             ann = self._get_page_annotation(self._viewer_page_index)
+            self._push_viewer_undo_state(
+                self._viewer_page_index, ann, action_kind="stroke"
+            )
             ann["strokes"].append(
                 {
                     "points": stroke,
@@ -1545,9 +1775,13 @@ class StudioBridge(QObject):
     @Slot()
     def clearFreehandStrokes(self) -> None:
         ann = self._get_page_annotation(self._viewer_page_index)
-        ann["strokes"].clear()
-        self._sync_current_page_viewer_state()
-        self.viewerChanged.emit()
+        if ann["strokes"]:
+            self._push_viewer_undo_state(
+                self._viewer_page_index, ann, action_kind="clear_strokes"
+            )
+            ann["strokes"].clear()
+            self._sync_current_page_viewer_state()
+            self.viewerChanged.emit()
 
     @Property(int, notify=viewerChanged)
     def freehandStrokeCount(self) -> int:
@@ -1947,6 +2181,139 @@ class StudioBridge(QObject):
                 self._settings.setValue("lastOutputDirectory", clean)
             self.configChanged.emit()
 
+    # --- Nombre editable del archivo de salida ---
+
+    def _output_target_spec(self) -> tuple[str, str]:
+        """Devuelve (nombre_sugerido_sin_extension, extension) según la herramienta y cola activa."""
+        valid_files = self._valid_queued_files()
+        if not valid_files:
+            return ("", ".pdf")
+
+        primary_file = valid_files[0].file_path
+        pdf_paths = [
+            qf.file_path
+            for qf in valid_files
+            if qf.file_path.suffix.lower() in SUPPORTED_PDF_EXTENSIONS
+        ]
+        img_paths = [
+            qf.file_path
+            for qf in valid_files
+            if qf.file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+        ]
+        tool = self._active_tool
+
+        if tool == ToolType.MERGE.value:
+            suffix = "_integrado" if (img_paths and pdf_paths) else "_unido"
+            return (f"{primary_file.stem}{suffix}", ".pdf")
+        if tool == ToolType.SPLIT.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_extraido", ".pdf")
+        if tool == ToolType.ORGANIZE.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_organizado", ".pdf")
+        if tool == ToolType.COMPRESS.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_comprimido", ".pdf")
+        if tool == ToolType.PDF_TO_IMAGES.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_imagenes", "")
+        if tool == ToolType.IMAGES_TO_PDF.value:
+            target = img_paths[0] if img_paths else primary_file
+            return (f"{target.stem}_album", ".pdf")
+        if tool == ToolType.WATERMARK.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_marca_agua", ".pdf")
+        if tool == ToolType.SIGN.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_firmado", ".pdf")
+        if tool == ToolType.PROTECT.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_protegido", ".pdf")
+        if tool == ToolType.UNLOCK.value:
+            target = pdf_paths[0] if pdf_paths else primary_file
+            return (f"{target.stem}_desbloqueado", ".pdf")
+        return (f"{primary_file.stem}_modificado", ".pdf")
+
+    def _resolve_effective_output_stem(self, fallback_stem: str, ext: str) -> str:
+        """Devuelve el nombre base efectivo sanitizado o el sugerido si no fue editado."""
+        if not self._output_name_user_edited:
+            return sanitize_windows_filename(
+                fallback_stem, fallback=fallback_stem, extension=ext
+            )
+        return sanitize_windows_filename(
+            self._custom_output_name,
+            fallback=fallback_stem,
+            extension=ext,
+        )
+
+    @Property(str, notify=configChanged)
+    def suggestedOutputName(self) -> str:
+        suggested, _ = self._output_target_spec()
+        return suggested
+
+    @Property(str, notify=configChanged)
+    def outputFileName(self) -> str:
+        if self._output_name_user_edited:
+            return self._custom_output_name
+        return self.suggestedOutputName
+
+    @Property(str, notify=configChanged)
+    def outputFileExtension(self) -> str:
+        _, ext = self._output_target_spec()
+        return ext
+
+    @Property(bool, notify=configChanged)
+    def isOutputNameCustomized(self) -> bool:
+        return self._output_name_user_edited
+
+    @Property(bool, notify=configChanged)
+    def isBatchMultiFileOutput(self) -> bool:
+        return (
+            self._active_tool
+            in {
+                ToolType.COMPRESS.value,
+                ToolType.PDF_TO_IMAGES.value,
+                ToolType.WATERMARK.value,
+            }
+            and self.pdfCount > 1
+        )
+
+    @Slot(str)
+    def setOutputFileName(self, name: str) -> None:
+        """Actualiza el borrador del nombre personalizado mientras el usuario edita."""
+        raw = str(name)
+        if not self._output_name_user_edited and raw == self.suggestedOutputName:
+            return
+        if raw != self._custom_output_name or not self._output_name_user_edited:
+            self._custom_output_name = raw
+            self._output_name_user_edited = True
+            self.configChanged.emit()
+
+    @Slot(result=str)
+    def commitOutputFileName(self) -> str:
+        """Sanitiza el nombre de salida y revierte al sugerido si queda vacío o inválido."""
+        suggested, ext = self._output_target_spec()
+        if not self._output_name_user_edited:
+            return suggested
+        cleaned = clean_windows_filename_stem(self._custom_output_name, extension=ext)
+        if not cleaned or cleaned == suggested:
+            self._custom_output_name = ""
+            self._output_name_user_edited = False
+            self.configChanged.emit()
+            return suggested
+        if cleaned != self._custom_output_name:
+            self._custom_output_name = cleaned
+            self.configChanged.emit()
+        return cleaned
+
+    @Slot()
+    def resetOutputFileName(self) -> None:
+        """Restaura el nombre de salida al valor automático sugerido."""
+        if self._output_name_user_edited or self._custom_output_name:
+            self._custom_output_name = ""
+            self._output_name_user_edited = False
+            self.configChanged.emit()
+
     # --- Historial Persistente (JSON) ---
 
     @Property("QVariantList", notify=historyChanged)
@@ -1982,6 +2349,11 @@ class StudioBridge(QObject):
         return self._last_output_file
 
     @Property(str, notify=progressChanged)
+    def lastOutputFilePath(self) -> str:
+        """Ruta absoluta normalizada del último archivo generado, independiente de la cola."""
+        return self._last_output_file_path
+
+    @Property(str, notify=progressChanged)
     def lastOutputFolder(self) -> str:
         return self._last_output_folder
 
@@ -2001,6 +2373,9 @@ class StudioBridge(QObject):
                 "Agrega al menos un archivo válido en la mesa de trabajo antes de procesar."
             )
             return
+
+        if self._output_name_user_edited:
+            self.commitOutputFileName()
 
         self._revalidate_output_directory()
         if not self._output_directory_valid:
@@ -2127,13 +2502,15 @@ class StudioBridge(QObject):
         compression_level: CompressionLevel,
         image_format: ImageFormat,
         watermark_config: WatermarkConfig,
+        custom_base_name: str = "",
         on_progress: Any = None,
         is_cancelled: Any = None,
     ) -> OperationResult:
         """Ejecuta compresión, exportación a imágenes o marca de agua sobre un lote de PDFs."""
         pe_mod = _pdf_engine_module()
         pdf_engine = pe_mod.PDFEngine
-        safe_path_fn = pe_mod.ensure_safe_output_path
+        clean_custom = clean_windows_filename_stem(custom_base_name, extension=".pdf")
+        protected_set = {Path(p).resolve() for p in pdf_files}
         all_outputs: list[Path] = []
         per_file_summaries: list[str] = []
         total_orig = 0
@@ -2151,10 +2528,14 @@ class StudioBridge(QObject):
                     on_progress(overall, f"[{i + 1}/{total}] {msg}")
 
             if tool == ToolType.COMPRESS:
-                dest = safe_path_fn(
-                    pdf_path,
-                    out_dir / f"{pdf_path.stem}_comprimido.pdf",
-                    "_comprimido",
+                fallback_stem = f"{pdf_path.stem}_comprimido"
+                desired_stem = f"{clean_custom}_{idx + 1}" if clean_custom else fallback_stem
+                dest = resolve_unique_output_path(
+                    out_dir,
+                    desired_stem,
+                    fallback_stem,
+                    extension=".pdf",
+                    protected_inputs=protected_set,
                 )
                 res = pdf_engine.compress_pdf(
                     pdf_path,
@@ -2165,7 +2546,15 @@ class StudioBridge(QObject):
                     is_cancelled=is_cancelled,
                 )
             elif tool == ToolType.PDF_TO_IMAGES:
-                subdir = out_dir / f"{pdf_path.stem}_imagenes"
+                fallback_stem = f"{pdf_path.stem}_imagenes"
+                desired_stem = f"{clean_custom}_{idx + 1}" if clean_custom else fallback_stem
+                subdir = resolve_unique_output_path(
+                    out_dir,
+                    desired_stem,
+                    fallback_stem,
+                    extension="",
+                    protected_inputs=protected_set,
+                )
                 res = pdf_engine.pdf_to_images(
                     pdf_path,
                     subdir,
@@ -2175,10 +2564,14 @@ class StudioBridge(QObject):
                     is_cancelled=is_cancelled,
                 )
             else:
-                dest = safe_path_fn(
-                    pdf_path,
-                    out_dir / f"{pdf_path.stem}_marca_agua.pdf",
-                    "_marca_agua",
+                fallback_stem = f"{pdf_path.stem}_marca_agua"
+                desired_stem = f"{clean_custom}_{idx + 1}" if clean_custom else fallback_stem
+                dest = resolve_unique_output_path(
+                    out_dir,
+                    desired_stem,
+                    fallback_stem,
+                    extension=".pdf",
+                    protected_inputs=protected_set,
                 )
                 res = pdf_engine.apply_watermark(
                     pdf_path,
@@ -2228,8 +2621,8 @@ class StudioBridge(QObject):
     ) -> PDFOperationWorker:
         pe_mod = _pdf_engine_module()
         pdf_engine = pe_mod.PDFEngine
-        safe_path_fn = pe_mod.ensure_safe_output_path
         valid_files = self._valid_queued_files()
+        protected_inputs = {qf.file_path.resolve() for qf in valid_files}
         pdf_paths = [
             qf.file_path
             for qf in valid_files
@@ -2241,23 +2634,25 @@ class StudioBridge(QObject):
             if qf.file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
         ]
 
+        suggested_stem, target_ext = self._output_target_spec()
+        desired_stem = self._resolve_effective_output_stem(suggested_stem, target_ext)
+
         if tool == ToolType.MERGE:
             all_paths = [qf.file_path for qf in valid_files]
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension=".pdf",
+                protected_inputs=protected_inputs,
+            )
             if img_paths and pdf_paths:
-                dest = safe_path_fn(
-                    primary_file,
-                    out_dir / f"{primary_file.stem}_integrado.pdf",
-                    "_integrado",
-                )
                 return PDFOperationWorker(
                     self._merge_mixed_files_task,
                     all_paths,
                     dest,
                     passwords=dict(self._passwords),
                 )
-            dest = safe_path_fn(
-                primary_file, out_dir / f"{primary_file.stem}_unido.pdf", "_unido"
-            )
             return PDFOperationWorker(
                 pdf_engine.merge_pdfs,
                 pdf_paths or all_paths,
@@ -2267,10 +2662,12 @@ class StudioBridge(QObject):
 
         if tool == ToolType.SPLIT:
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
-            dest = safe_path_fn(
-                target_pdf,
-                out_dir / f"{target_pdf.stem}_extraido.pdf",
-                "_extraido",
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension=".pdf",
+                protected_inputs=protected_inputs,
             )
             return PDFOperationWorker(
                 pdf_engine.split_pdf_by_range,
@@ -2290,10 +2687,12 @@ class StudioBridge(QObject):
                 )
                 for p in self._organizer_pages
             ]
-            dest = safe_path_fn(
-                target_pdf,
-                out_dir / f"{target_pdf.stem}_organizado.pdf",
-                "_organizado",
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension=".pdf",
+                protected_inputs=protected_inputs,
             )
             return PDFOperationWorker(
                 pdf_engine.organize_pdf,
@@ -2310,6 +2709,7 @@ class StudioBridge(QObject):
                 angle=self._watermark_angle,
                 position=WatermarkPosition(self._watermark_position),
             )
+            custom_base = self._custom_output_name if self._output_name_user_edited else ""
             return PDFOperationWorker(
                 self._batch_pdf_task,
                 pdf_paths,
@@ -2319,14 +2719,17 @@ class StudioBridge(QObject):
                 CompressionLevel(self._compression_level),
                 ImageFormat(self._image_format),
                 wm_cfg,
+                custom_base_name=custom_base,
             )
 
         if tool == ToolType.COMPRESS:
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
-            dest = safe_path_fn(
-                target_pdf,
-                out_dir / f"{target_pdf.stem}_comprimido.pdf",
-                "_comprimido",
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension=".pdf",
+                protected_inputs=protected_inputs,
             )
             return PDFOperationWorker(
                 pdf_engine.compress_pdf,
@@ -2338,7 +2741,13 @@ class StudioBridge(QObject):
 
         if tool == ToolType.PDF_TO_IMAGES:
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
-            export_subdir = out_dir / f"{target_pdf.stem}_imagenes"
+            export_subdir = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension="",
+                protected_inputs=protected_inputs,
+            )
             return PDFOperationWorker(
                 pdf_engine.pdf_to_images,
                 target_pdf,
@@ -2349,10 +2758,12 @@ class StudioBridge(QObject):
 
         if tool == ToolType.IMAGES_TO_PDF:
             target_imgs = img_paths or [qf.file_path for qf in valid_files]
-            dest = safe_path_fn(
-                target_imgs[0],
-                out_dir / f"{target_imgs[0].stem}_album.pdf",
-                "_album",
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension=".pdf",
+                protected_inputs=protected_inputs,
             )
             return PDFOperationWorker(
                 pdf_engine.images_to_pdf,
@@ -2362,10 +2773,12 @@ class StudioBridge(QObject):
 
         if tool == ToolType.WATERMARK:
             target_pdf = pdf_paths[0] if pdf_paths else primary_file
-            dest = safe_path_fn(
-                target_pdf,
-                out_dir / f"{target_pdf.stem}_marca_agua.pdf",
-                "_marca_agua",
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension=".pdf",
+                protected_inputs=protected_inputs,
             )
             wm_cfg = WatermarkConfig(
                 text=self._watermark_text,
@@ -2383,10 +2796,12 @@ class StudioBridge(QObject):
 
         # ToolType.SIGN
         target_pdf = pdf_paths[0] if pdf_paths else primary_file
-        dest = safe_path_fn(
-            target_pdf,
-            out_dir / f"{target_pdf.stem}_firmado.pdf",
-            "_firmado",
+        dest = resolve_unique_output_path(
+            out_dir,
+            desired_stem,
+            suggested_stem,
+            extension=".pdf",
+            protected_inputs=protected_inputs,
         )
         # Asegurar que la página actual esté inicializada en _page_annotations
         self._get_page_annotation(self._viewer_page_index)
@@ -2448,18 +2863,23 @@ class StudioBridge(QObject):
         self._progress_percent = 100
         self._status_message = result.message
 
-        first_out = str(result.output_files[0]) if result.output_files else ""
-        folder_out = (
-            str(result.output_files[0].parent) if result.output_files else ""
+        resolved_first = (
+            str(Path(result.output_files[0]).resolve()) if result.output_files else ""
         )
-        self._last_output_file = first_out
+        folder_out = (
+            str(Path(result.output_files[0]).resolve().parent)
+            if result.output_files
+            else ""
+        )
+        self._last_output_file = resolved_first
+        self._last_output_file_path = resolved_first
         self._last_output_folder = folder_out
 
         self.history_store.record_operation(result)
         self.progressChanged.emit()
         self.activeToolChanged.emit()
         self.historyChanged.emit()
-        self.operationCompleted.emit(result.message, first_out, folder_out)
+        self.operationCompleted.emit(result.message, resolved_first, folder_out)
 
     def _on_worker_cancelled(self, message: str) -> None:
         self._is_busy = False
@@ -2477,20 +2897,122 @@ class StudioBridge(QObject):
         self.activeToolChanged.emit()
         self._emit_error(error_msg)
 
-    @Slot(str)
-    def openFileInSystem(self, file_path_str: str) -> None:
-        target = file_path_str or self._last_output_file
-        if target and Path(target).exists():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+    @staticmethod
+    def _normalize_target_path(raw_path: str) -> Path | None:
+        text = (raw_path or "").strip()
+        if not text:
+            return None
+        if text.startswith("file:"):
+            text = QUrl(text).toLocalFile()
+        if not text:
+            return None
+        return Path(text).resolve()
 
-    @Slot(str)
-    def showFileInFolder(self, file_or_folder_str: str) -> None:
-        target = Path(file_or_folder_str or self._last_output_file or self._last_output_folder)
-        if not target.exists():
-            return
-        if sys.platform.startswith("win") and target.is_file():
-            subprocess.Popen(["explorer", "/select,", str(target.resolve())])
+    @Slot(str, result=bool)
+    def openFileInSystem(self, file_path_str: str = "") -> bool:
+        """Abre el archivo generado en la aplicación predeterminada con manejo explícito de errores."""
+        raw = (
+            (file_path_str or "").strip()
+            or self._last_output_file_path
+            or self._last_output_file
+        )
+        target_path = self._normalize_target_path(raw)
+        if target_path is None:
+            self._emit_error("Todavía no hay ningún archivo generado para abrir.")
+            return False
+        if not target_path.exists():
+            self._emit_error(
+                f"No se encontró el archivo generado en '{target_path}'."
+            )
+            return False
+
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(target_path))  # type: ignore[attr-defined]
+            else:
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target_path))):
+                    self._emit_error(
+                        f"No se pudo abrir '{target_path.name}' con la aplicación predeterminada."
+                    )
+                    return False
+            return True
+        except OSError as exc:
+            self._emit_error(f"No se pudo abrir '{target_path.name}': {exc}")
+            return False
+
+    @Slot(str, result=bool)
+    def showFileInFolder(self, file_or_folder_str: str = "") -> bool:
+        """Abre la carpeta de destino en el Explorador seleccionando el archivo cuando existe."""
+        raw = (
+            (file_or_folder_str or "").strip()
+            or self._last_output_file_path
+            or self._last_output_file
+            or self._last_output_folder
+        )
+        target_path = self._normalize_target_path(raw)
+        if target_path is None:
+            self._emit_error("Todavía no hay ninguna ubicación de salida para mostrar.")
+            return False
+
+        if sys.platform.startswith("win"):
+            if target_path.exists() and target_path.is_file():
+                try:
+                    subprocess.Popen(["explorer", "/select,", str(target_path)])
+                    return True
+                except OSError:
+                    if target_path.parent.exists():
+                        try:
+                            os.startfile(str(target_path.parent))  # type: ignore[attr-defined]
+                            return True
+                        except OSError as exc:
+                            self._emit_error(
+                                f"No se pudo abrir la carpeta '{target_path.parent}': {exc}"
+                            )
+                            return False
+                    self._emit_error(
+                        f"No se pudo abrir el Explorador para '{target_path}'."
+                    )
+                    return False
+
+            if target_path.exists() and target_path.is_dir():
+                try:
+                    os.startfile(str(target_path))  # type: ignore[attr-defined]
+                    return True
+                except OSError as exc:
+                    self._emit_error(
+                        f"No se pudo abrir la carpeta '{target_path}': {exc}"
+                    )
+                    return False
+
+            if target_path.parent.exists() and target_path.parent.is_dir():
+                try:
+                    os.startfile(str(target_path.parent))  # type: ignore[attr-defined]
+                    self._emit_notice(
+                        f"El archivo '{target_path.name}' ya no existe; se abrió su carpeta.",
+                        is_error=False,
+                    )
+                    return True
+                except OSError as exc:
+                    self._emit_error(
+                        f"No se pudo abrir la carpeta '{target_path.parent}': {exc}"
+                    )
+                    return False
+
+            self._emit_error(
+                f"La ubicación '{target_path}' ya no existe en el equipo."
+            )
+            return False
+
+        if target_path.exists():
+            folder = target_path if target_path.is_dir() else target_path.parent
+        elif target_path.parent.exists():
+            folder = target_path.parent
         else:
-            folder = target if target.is_dir() else target.parent
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
+            self._emit_error(f"La ubicación '{target_path}' ya no existe.")
+            return False
+
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            self._emit_error(f"No se pudo abrir la carpeta '{folder}'.")
+            return False
+        return True
 

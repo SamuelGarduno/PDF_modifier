@@ -15,6 +15,7 @@ from ui.theme import (
     ThemePalette,
     generate_stationery_qss,
     load_custom_fonts,
+    resolve_resource_path,
 )
 
 __all__ = [
@@ -33,5 +34,6 @@ __all__ = [
     "ThemePalette",
     "generate_stationery_qss",
     "load_custom_fonts",
+    "resolve_resource_path",
 ]
 

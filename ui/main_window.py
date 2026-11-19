@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from PySide6.QtCore import QUrl
+from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtQml import QQmlApplicationEngine
 
 from core.history import OperationHistoryStore
 from ui.bridge import StudioBridge
 from ui.image_provider import PDFPageImageProvider
-from ui.theme import ThemePalette, load_custom_fonts
+from ui.theme import ThemePalette, load_custom_fonts, resolve_resource_path
 
 
 class CoquetteQuickApp:
@@ -17,6 +18,10 @@ class CoquetteQuickApp:
 
     def __init__(self, history_store: OperationHistoryStore | None = None) -> None:
         load_custom_fonts()
+        icon_path = resolve_resource_path("assets", "app_icon.ico")
+        app = QGuiApplication.instance()
+        if app is not None and app.windowIcon().isNull() and icon_path.exists():
+            app.setWindowIcon(QIcon(str(icon_path)))
         self.engine = QQmlApplicationEngine()
         self.theme_palette = ThemePalette()
         self.image_provider = PDFPageImageProvider()
@@ -35,7 +40,7 @@ class CoquetteQuickApp:
 
     def load_main_qml(self) -> object:
         """Carga el archivo QML principal y devuelve la QQuickWindow raíz."""
-        qml_path = Path(__file__).resolve().parent / "qml" / "Main.qml"
+        qml_path = resolve_resource_path("ui", "qml", "Main.qml")
         self.engine.load(QUrl.fromLocalFile(str(qml_path)))
         roots = self.engine.rootObjects()
         if not roots:

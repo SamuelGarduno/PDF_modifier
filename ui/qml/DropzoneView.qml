@@ -592,13 +592,31 @@ Item {
                 }
             }
 
-            // Reordenar (↑ ↓ o arrastre) conserva respuesta inmediata para no interferir con indexAt()
-            move: Transition {
+            // Reordenar (↑ ↓ o arrastre) con animación ligera en 'y' (140 ms OutQuad) apta para Pentium
+            Transition {
+                id: queueMoveTransition
+                objectName: "queueMoveTransition"
                 PropertyAction { property: "opacity"; value: 1.0 }
+                NumberAnimation {
+                    objectName: "queueMoveYAnim"
+                    properties: "y"
+                    duration: Theme.animReorder
+                    easing.type: Easing.OutQuad
+                }
             }
-            moveDisplaced: Transition {
+            Transition {
+                id: queueMoveDisplacedTransition
+                objectName: "queueMoveDisplacedTransition"
                 PropertyAction { property: "opacity"; value: 1.0 }
+                NumberAnimation {
+                    objectName: "queueMoveDisplacedYAnim"
+                    properties: "y"
+                    duration: Theme.animReorder
+                    easing.type: Easing.OutQuad
+                }
             }
+            move: queueMoveTransition
+            moveDisplaced: queueMoveDisplacedTransition
 
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -784,17 +802,16 @@ Item {
                                     dropzoneRoot.dropTargetIndex = fileCardFocusScope.rowIndex
                                 }
                                 onPositionChanged: function(mouse) {
-                                    if (!pressed || dropzoneRoot.draggedFileIndex < 0)
+                                    if (!pressed || dropzoneRoot.draggedFileIndex < 0 || queueModel.count <= 0)
                                         return
                                     var listPos = mapToItem(queueListView.contentItem, mouse.x, mouse.y)
-                                    var targetIdx = queueListView.indexAt(queueListView.width / 2, listPos.y)
-                                    if (targetIdx >= 0) {
-                                        dropzoneRoot.dropTargetIndex = targetIdx
-                                        if (targetIdx !== dropzoneRoot.draggedFileIndex) {
-                                            var fromIdx = dropzoneRoot.draggedFileIndex
-                                            dropzoneRoot.draggedFileIndex = targetIdx
-                                            studioBridge.moveFile(fromIdx, targetIdx)
-                                        }
+                                    var rowStep = 88 + queueListView.spacing
+                                    var targetIdx = Math.max(0, Math.min(queueModel.count - 1, Math.floor(listPos.y / rowStep)))
+                                    dropzoneRoot.dropTargetIndex = targetIdx
+                                    if (targetIdx !== dropzoneRoot.draggedFileIndex) {
+                                        var fromIdx = dropzoneRoot.draggedFileIndex
+                                        dropzoneRoot.draggedFileIndex = targetIdx
+                                        studioBridge.moveFile(fromIdx, targetIdx)
                                     }
                                 }
                                 onReleased: {

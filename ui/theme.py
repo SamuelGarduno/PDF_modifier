@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from PySide6.QtCore import Property, QObject, Signal
 from PySide6.QtGui import QFontDatabase
 
@@ -40,10 +41,17 @@ SCRIPT_FAMILIES = ["Cormorant Garamond", "Playfair Display", "Georgia"]
 SANS_FAMILIES = ["Quicksand", "Nunito", "Inter", "Segoe UI"]
 
 
+def resolve_resource_path(*relative_parts: str) -> Path:
+    """Resuelve rutas de recursos internos tanto en desarrollo como en PyInstaller (_MEIPASS)."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    base_dir = Path(meipass) if meipass else Path(__file__).resolve().parent.parent
+    return base_dir.joinpath(*relative_parts)
+
+
 def load_custom_fonts(fonts_dir: Path | None = None) -> list[str]:
     """Carga automáticamente archivos .ttf y .otf desde assets/fonts/ mediante QFontDatabase."""
     if fonts_dir is None:
-        fonts_dir = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+        fonts_dir = resolve_resource_path("assets", "fonts")
     loaded_families: list[str] = []
     if not fonts_dir.exists():
         return loaded_families

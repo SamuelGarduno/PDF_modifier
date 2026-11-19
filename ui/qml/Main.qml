@@ -357,13 +357,13 @@ Window {
             anchors.rightMargin: 20
             anchors.bottomMargin: 14
 
-            // Zona 3 - Barra de Acción (siempre visible, anclada abajo, ~64 px)
+            // Zona 3 - Barra de Acción (siempre visible, anclada abajo)
             FooterBar {
                 id: bottomFooterBar
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                height: Theme.actionBarHeight
+                height: bottomFooterBar.implicitHeight
             }
 
             // Barra de ajustes específicos (SOLO visible cuando se abre una herramienta con opciones)
@@ -726,7 +726,7 @@ Window {
                     primaryStyle: true
                     solidShadow: true
                     onClicked: {
-                        studioBridge.openFileInSystem(studioBridge.lastOutputFile)
+                        studioBridge.openFileInSystem(studioBridge.lastOutputFilePath)
                         completionPopup.close()
                     }
                 }
@@ -738,7 +738,7 @@ Window {
                     primaryStyle: false
                     solidShadow: false
                     onClicked: {
-                        studioBridge.showFileInFolder(studioBridge.lastOutputFile)
+                        studioBridge.showFileInFolder(studioBridge.lastOutputFilePath)
                         completionPopup.close()
                     }
                 }
