@@ -26,7 +26,7 @@ Tus archivos **nunca se suben a ningún servidor** ni se modifican los originale
 
 | Paso 1. Suelta tus archivos | Paso 2. Elige la herramienta | Paso 3. Guarda con seguridad |
 | :--- | :--- | :--- |
-| Arrastra tus documentos **PDF** o imágenes (**PNG, JPG, JPEG, WEBP**) a la mesa de trabajo, o pulsa **"Seleccionar archivos..."**. | La aplicación detecta lo que soltaste y te sugiere automáticamente la acción ideal según el tipo y cantidad de archivos. | Por defecto se guarda en la misma carpeta del original (puedes cambiarla en **"Guardar en:"**). Pulsa el botón principal para procesar. |
+| Arrastra tus documentos **PDF**, **Word (`.docx`, `.doc`)** o imágenes (**PNG, JPG, JPEG, WEBP**) a la mesa de trabajo, o pulsa **"Seleccionar archivos..."**. | La aplicación detecta lo que soltaste y te sugiere automáticamente la acción ideal según el tipo y cantidad de archivos. | Por defecto se guarda en la misma carpeta del original (puedes cambiarla en **"Guardar en:"**). Pulsa el botón principal para procesar. |
 
 > [!IMPORTANT]
 > **Garantía de seguridad:** La aplicación **nunca sobrescribe ni borra tus archivos originales**. Siempre crea un archivo nuevo añadiendo un sufijo automático seguro (por ejemplo `_comprimido`, `_unido` o `_firmado`).
@@ -41,7 +41,7 @@ Tus archivos **nunca se suben a ningún servidor** ni se modifican los originale
 | :--- | :--- |
 | **Unir PDF** | Junta varios documentos PDF en un solo archivo ordenado. Si mezclas PDFs con imágenes (`PNG`, `JPG`, `WEBP`), los integra todos en un único PDF. |
 | **Organizar Páginas** | Visualiza todas las hojas en miniatura para reordenarlas arrastrando, rotarlas 90°, duplicarlas o eliminar las que no necesites. |
-| **Dividir y Extraer** | Extrae únicamente las páginas que te interesan indicando un rango sencillo (por ejemplo `1-5, 8`) o guarda cada hoja como un PDF independiente. |
+| **Dividir y Extraer** | Selecciona visualmente hoja por hoja desde las miniaturas o escribe un rango sencillo (por ejemplo `1-5, 8`) para extraer páginas o guardar cada hoja como un PDF independiente. |
 
 ### Optimización y conversión
 
@@ -50,6 +50,7 @@ Tus archivos **nunca se suben a ningún servidor** ni se modifican los originale
 | **Comprimir PDF** | Reduce el peso del archivo para enviarlo fácil por correo o WhatsApp, eligiendo entre tres niveles reales (*Extrema*, *Recomendada* y *Baja pérdida*) con estimación previa del ahorro. Si ya es muy ligero, te avisa sin dañarlo. |
 | **PDF a Imágenes** | Convierte cada página de un documento PDF en imágenes individuales en formato **PNG** o **JPG**. |
 | **Imágenes a PDF** | Transforma una o varias fotos e imágenes (`PNG`, `JPG`, `JPEG`, `WEBP`) en un solo documento PDF. |
+| **Word a PDF** | Convierte documentos **`.docx` y `.doc`** a PDF (o los integra junto con PDFs e imágenes al unir). *Requiere tener Microsoft Word instalado en el equipo.* |
 
 ### Edición, marcas y firmas
 

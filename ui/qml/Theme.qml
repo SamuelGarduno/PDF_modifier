@@ -153,6 +153,8 @@ QtObject {
         case "pdf_to_images":
         case "images_to_pdf":
             return colorImages
+        case "word_to_pdf":
+            return "#8DA5BC"
         case "watermark":
         case "sign":
             return colorWatermarkSign
@@ -176,6 +178,8 @@ QtObject {
         case "pdf_to_images":
         case "images_to_pdf":
             return "#E1E9F0"
+        case "word_to_pdf":
+            return "#E1E9F0"
         case "watermark":
         case "sign":
             return "#EED9DF"
@@ -198,6 +202,8 @@ QtObject {
             return "#392C54"
         case "pdf_to_images":
         case "images_to_pdf":
+            return "#264159"
+        case "word_to_pdf":
             return "#264159"
         case "watermark":
         case "sign":
@@ -225,6 +231,8 @@ QtObject {
             return "../../assets/icons/tool_pdf_to_images.svg"
         case "images_to_pdf":
             return "../../assets/icons/tool_images_to_pdf.svg"
+        case "word_to_pdf":
+            return "../../assets/icons/tool_organize.svg"
         case "watermark":
             return "../../assets/icons/tool_watermark.svg"
         case "sign":

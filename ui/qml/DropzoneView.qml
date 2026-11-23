@@ -53,7 +53,7 @@ Item {
 
         function updateExistingIfChanged(row, source) {
             var current = queueModel.get(row)
-            var keys = ["name", "sizeFormatted", "sizeBytes", "pageCount", "isEncrypted", "isLocked", "isCorrupted", "isImage", "status", "thumbnailUrl"]
+            var keys = ["name", "sizeFormatted", "sizeBytes", "pageCount", "isEncrypted", "isLocked", "isCorrupted", "isImage", "isWord", "status", "thumbnailUrl"]
             for (var k = 0; k < keys.length; k++) {
                 var prop = keys[k]
                 if (current[prop] !== source[prop])
@@ -146,11 +146,12 @@ Item {
 
     FileDialog {
         id: filePickerDialog
-        title: "Seleccionar documentos PDF o imágenes"
+        title: "Seleccionar documentos PDF, Word o imágenes"
         fileMode: FileDialog.OpenFiles
         nameFilters: [
-            "Documentos y Láminas (*.pdf *.png *.jpg *.jpeg *.webp)",
+            "Documentos, Word y Láminas (*.pdf *.docx *.doc *.png *.jpg *.jpeg *.webp)",
             "Archivos PDF (*.pdf)",
+            "Documentos Word (*.docx *.doc)",
             "Imágenes (*.png *.jpg *.jpeg *.webp)"
         ]
         onAccepted: {
@@ -395,7 +396,7 @@ Item {
             Text {
                 objectName: "emptyStateSubtitleText"
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "Suelta primero tus archivos (PDF, PNG, JPG, WEBP) y elige después qué hacer"
+                text: "Suelta primero tus archivos (PDF, Word .docx/.doc, PNG, JPG, WEBP) y elige después qué hacer"
                 font.family: Theme.scriptFont
                 font.italic: true
                 font.pixelSize: 13
@@ -458,6 +459,7 @@ Item {
 
                 PillButton {
                     objectName: "keepOnlyPdfsButton"
+                    visible: studioBridge.pdfCount > 0
                     height: 28
                     horizontalPadding: 12
                     text: "Solo PDFs (" + studioBridge.pdfCount + ")"
@@ -467,7 +469,19 @@ Item {
                 }
 
                 PillButton {
+                    objectName: "keepOnlyWordButton"
+                    visible: studioBridge.wordCount > 0
+                    height: 28
+                    horizontalPadding: 12
+                    text: "Solo Word (" + studioBridge.wordCount + ")"
+                    primaryStyle: false
+                    solidShadow: false
+                    onClicked: studioBridge.keepOnlyWord()
+                }
+
+                PillButton {
                     objectName: "keepOnlyImagesButton"
+                    visible: studioBridge.imageCount > 0
                     height: 28
                     horizontalPadding: 12
                     text: "Solo imágenes (" + studioBridge.imageCount + ")"
@@ -865,9 +879,9 @@ Item {
 
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
-                                    text: fileEntry.isCorrupted ? "!" : "···"
+                                    text: fileEntry.isCorrupted ? "!" : (fileEntry.isWord ? "DOC" : "···")
                                     font.family: Theme.serifFont
-                                    font.pixelSize: fileEntry.isCorrupted ? 18 : 14
+                                    font.pixelSize: fileEntry.isCorrupted ? 18 : (fileEntry.isWord ? 13 : 14)
                                     font.bold: true
                                     color: fileEntry.isCorrupted ? Theme.errorText : Theme.textSecondary
                                 }
@@ -930,10 +944,12 @@ Item {
                                           ? "No se pudo leer · Se excluirá del proceso"
                                           : (fileEntry.isLocked
                                              ? ("Protegido con clave · " + fileEntry.sizeFormatted)
-                                             : ((fileEntry.isImage
-                                                 ? "1 postal"
-                                                 : (fileEntry.pageCount + (fileEntry.pageCount === 1 ? " página" : " páginas")))
-                                                + " · " + fileEntry.sizeFormatted))
+                                             : (fileEntry.isWord
+                                                ? ("Documento Word · " + fileEntry.sizeFormatted)
+                                                : ((fileEntry.isImage
+                                                    ? "1 postal"
+                                                    : (fileEntry.pageCount + (fileEntry.pageCount === 1 ? " página" : " páginas")))
+                                                   + " · " + fileEntry.sizeFormatted)))
                                     font.family: Theme.scriptFont
                                     font.italic: true
                                     font.pixelSize: Theme.fontMetaSize

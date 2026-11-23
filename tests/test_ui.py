@@ -99,7 +99,8 @@ def test_password_tools_removed_and_contextual_suggestions_all_cases(
     catalog_ids = {item["id"] for item in bridge.filteredTools}
     assert "protect" not in catalog_ids
     assert "unlock" not in catalog_ids
-    assert len(catalog_ids) == 8
+    assert "word_to_pdf" in catalog_ids
+    assert len(catalog_ids) == 9
 
     # Estado inicial: Mesa de Trabajo Vacía
     assert bridge.fileCount == 0
@@ -188,8 +189,8 @@ def test_edge_cases_unsupported_formats_and_zero_byte_files(
     bridge = app_wrapper.studio_bridge
     qtbot.waitExposed(window)
 
-    docx_file = tmp_path / "carta.docx"
-    docx_file.write_text("contenido word", encoding="utf-8")
+    unsupported_xlsx = tmp_path / "hoja.xlsx"
+    unsupported_xlsx.write_text("contenido excel", encoding="utf-8")
     zip_file = tmp_path / "archivo.zip"
     zip_file.write_bytes(b"PK\x03\x04")
     exe_file = tmp_path / "instalador.exe"
@@ -202,7 +203,7 @@ def test_edge_cases_unsupported_formats_and_zero_byte_files(
 
     # Soltar archivos inválidos junto con 1 PDF válido: ignora los inválidos, muestra aviso y carga el válido
     bridge.addFileUrls(
-        [str(docx_file), str(zip_file), str(exe_file), str(empty_pdf), str(sample_pdf_5p)]
+        [str(unsupported_xlsx), str(zip_file), str(exe_file), str(empty_pdf), str(sample_pdf_5p)]
     )
     assert bridge.fileCount == 1
     assert bridge.queuedFiles[0]["name"] == sample_pdf_5p.name
@@ -1912,6 +1913,185 @@ def test_v11_movable_free_text_stamp_and_pdf_export(
         assert wine_pixels > 5, "El sello movible con texto libre no se estampó en la nueva posición"
 
     window.close()
+
+
+def test_stamp_has_no_decorative_stars_in_preview_or_pdf(
+    sample_pdf_3p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 2: El sello muestra exactamente el texto escrito, sin caracteres '✦' alrededor."""
+    from pathlib import Path as _Path
+    from core.models import SignatureOverlay
+    from core.pdf_engine import PDFEngine
+
+    # Verificar que ni el QML ni el PDFEngine contengan adornos '✦' en el renderizado del sello
+    qml_text = _Path("ui/qml/PdfViewerSignView.qml").read_text(encoding="utf-8")
+    assert "✦" not in qml_text
+
+    overlay = SignatureOverlay(page_index=0, stamp_label="Válido 2026")
+    png_bytes = PDFEngine.render_signature_overlay_png(overlay, 595.0, 842.0)
+    assert len(png_bytes) > 0
+
+    store = OperationHistoryStore(storage_path=tmp_path / "stamp_clean_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_3p))
+    bridge.selectTool("sign")
+    bridge.setSignatureStamp("Solo Mi Texto")
+    qtbot.wait(50)
+
+    stamp_box = window.findChild(QQuickItem, "stampPreviewBox")
+    assert stamp_box is not None
+    # Verificar recursivamente que los Text dentro de stampPreviewBox no tengan '✦'
+    texts = [child.property("text") for child in stamp_box.findChildren(QQuickItem) if child.property("text") is not None]
+    assert "Solo Mi Texto" in texts
+    assert all("✦" not in str(t) for t in texts)
+    window.close()
+
+
+def test_show_file_in_folder_uses_shell_api_and_debounce(
+    sample_pdf_3p: Path, tmp_path: Path, qtbot, monkeypatch
+) -> None:
+    """Req 3: showFileInFolder usa Shell API sin duplicar ventanas, aplica debounce y maneja archivos borrados."""
+    from unittest.mock import MagicMock
+    from ui.bridge import StudioBridge
+
+    store = OperationHistoryStore(storage_path=tmp_path / "folder_hist.json")
+    bridge = StudioBridge(history_store=store)
+
+    target_file = tmp_path / "resultado.pdf"
+    target_file.write_bytes(b"%PDF-1.4\n")
+
+    shell_mock = MagicMock(return_value=True)
+    monkeypatch.setattr(bridge, "_open_folder_and_select_item_win", shell_mock)
+    monkeypatch.setattr("ui.bridge.sys.platform", "win32")
+
+    clock = {"t": 10.0}
+    monkeypatch.setattr("ui.bridge.time.monotonic", lambda: clock["t"])
+
+    assert bridge.showFileInFolder(str(target_file)) is True
+    assert shell_mock.call_count == 1
+
+    # Segundo clic rápido dentro de 800 ms debe ser bloqueado por debounce
+    clock["t"] = 10.3
+    assert bridge.showFileInFolder(str(target_file)) is True
+    assert shell_mock.call_count == 1
+
+    # Pasados > 800 ms vuelve a ejecutar
+    clock["t"] = 11.2
+    assert bridge.showFileInFolder(str(target_file)) is True
+    assert shell_mock.call_count == 2
+
+    # Si el archivo fue borrado, no falla y abre la carpeta padre de forma segura
+    target_file.unlink()
+    startfile_mock = MagicMock()
+    monkeypatch.setattr("ui.bridge.os.startfile", startfile_mock, raising=False)
+    clock["t"] = 12.5
+    assert bridge.showFileInFolder(str(target_file)) is True
+    startfile_mock.assert_called_once_with(str(tmp_path.resolve()))
+
+
+def test_split_visual_thumbnail_selection_and_bidirectional_sync(
+    sample_pdf_5p: Path, tmp_path: Path, qtbot
+) -> None:
+    """Req 4: Vista previa de miniaturas en Dividir y Extraer con sincronización bidireccional."""
+    import pymupdf as fitz
+
+    store = OperationHistoryStore(storage_path=tmp_path / "split_visual_hist.json")
+    app_wrapper = CoquetteQuickApp(history_store=store)
+    window = app_wrapper.load_main_qml()
+    bridge = app_wrapper.studio_bridge
+    qtbot.waitExposed(window)
+
+    bridge.addSingleFilePath(str(sample_pdf_5p))
+    bridge.setOutputDirectory(str(tmp_path))
+    bridge.selectTool("split")
+    qtbot.wait(80)
+
+    assert bridge.workspaceMode == "split"
+    split_view = window.findChild(QQuickItem, "splitPagesView")
+    assert split_view is not None and split_view.isVisible() is True
+    assert len(bridge.splitPages) == 5
+
+    # Limpiar selección y seleccionar hojas 1, 2, 3 y 5 (índices 0, 1, 2, 4)
+    bridge.clearSplitSelection()
+    assert bridge.rangeExpr == ""
+    assert bridge.splitSelectedCount == 0
+
+    for idx in (0, 1, 2, 4):
+        bridge.toggleSplitPage(idx)
+    assert bridge.rangeExpr == "1-3, 5"
+    assert bridge.splitSelectedCount == 4
+    assert [p["selected"] for p in bridge.splitPages] == [True, True, True, False, True]
+
+    # Sincronización inversa: escribir rango en el input actualiza las miniaturas
+    bridge.setRangeExpr("2, 4-5")
+    assert [p["selected"] for p in bridge.splitPages] == [False, True, False, True, True]
+
+    # Rango inválido o fuera de límites (ej. 999 en PDF de 5 páginas) no rompe la cuadrícula
+    bridge.setRangeExpr("999")
+    assert bridge.isRangeValid is False
+    assert [p["selected"] for p in bridge.splitPages] == [False, False, False, False, False]
+
+    # Botón rápido "Seleccionar todas" y volver a rango concreto para extraer
+    bridge.selectAllSplitPages()
+    assert bridge.rangeExpr == "1-5"
+    assert bridge.splitSelectedCount == 5
+
+    bridge.setRangeExpr("1, 3, 5")
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as blocker:
+        bridge.executeActiveOperation()
+    out_pdf = Path(blocker.args[1])
+    assert out_pdf.exists()
+    with fitz.open(out_pdf) as doc:
+        assert len(doc) == 3
+
+    window.close()
+
+
+def test_word_drop_flow_and_mock_conversion_in_bridge(
+    sample_pdf_3p: Path, tmp_path: Path, qtbot, monkeypatch
+) -> None:
+    """Req 1: Soltar .docx sugiere Word a PDF y mezclarlo con PDF integra ambos en modo mock."""
+    import pymupdf as fitz
+    from ui.bridge import StudioBridge
+
+    monkeypatch.setenv("FLORAL_MOCK_WORD", "1")
+    docx_path = tmp_path / "Oficio 'Prueba' (1).docx"
+    docx_path.write_bytes(b"PK\x03\x04mock-docx")
+
+    store = OperationHistoryStore(storage_path=tmp_path / "word_bridge_hist.json")
+    bridge = StudioBridge(history_store=store)
+    bridge.setOutputDirectory(str(tmp_path))
+
+    # 1. Solo Word -> sugiere 'word_to_pdf'
+    bridge.addSingleFilePath(str(docx_path))
+    assert bridge.inputContextState == "word_only"
+    assert bridge.wordCount == 1
+    assert bridge.primarySuggestedTool["id"] == "word_to_pdf"
+
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as blocker:
+        bridge.triggerPrimaryAction()
+    converted_pdf = Path(blocker.args[1])
+    assert converted_pdf.exists()
+    with fitz.open(converted_pdf) as doc:
+        assert len(doc) == 1
+        assert "Oficio 'Prueba' (1).docx" in doc[0].get_text()
+
+    # 2. Mezcla de Word + PDF -> sugiere 'merge' e integra ambos
+    bridge.addSingleFilePath(str(sample_pdf_3p))
+    assert bridge.inputContextState == "mixed"
+    assert bridge.primarySuggestedTool["id"] == "merge"
+
+    with qtbot.waitSignal(bridge.operationCompleted, timeout=10000) as merge_blocker:
+        bridge.triggerPrimaryAction()
+    merged_pdf = Path(merge_blocker.args[1])
+    assert merged_pdf.exists()
+    with fitz.open(merged_pdf) as doc:
+        assert len(doc) == 4  # 1 página simulada de Word + 3 páginas del PDF
+
 
 
 

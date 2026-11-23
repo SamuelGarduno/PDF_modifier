@@ -20,6 +20,7 @@ class ToolType(StrEnum):
     IMAGES_TO_PDF = "images_to_pdf"
     WATERMARK = "watermark"
     SIGN = "sign"
+    WORD_TO_PDF = "word_to_pdf"
 
 
 class CompressionLevel(StrEnum):

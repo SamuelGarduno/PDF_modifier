@@ -487,7 +487,7 @@ Item {
                         font.family: themePalette.serifFont
                         font.pixelSize: Math.max(10, Math.round(stampPreviewBox.height * 0.28))
                         font.bold: true
-                        text: "✦ " + studioBridge.signatureStamp + " ✦"
+                        text: studioBridge.signatureStamp
                     }
 
                     function syncStampBoxWidthToText() {
@@ -532,7 +532,7 @@ Item {
                         fontSizeMode: Text.Fit
                         minimumPixelSize: 8
                         elide: Text.ElideRight
-                        text: "✦ " + studioBridge.signatureStamp + " ✦"
+                        text: studioBridge.signatureStamp
                         font.family: themePalette.serifFont
                         font.pixelSize: Math.max(10, Math.round(parent.height * 0.28))
                         font.bold: true

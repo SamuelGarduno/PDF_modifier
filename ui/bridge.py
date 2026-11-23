@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -48,7 +50,12 @@ from core.models import (
     WatermarkConfig,
     WatermarkPosition,
 )
-from core.range_parser import validate_page_ranges_realtime
+from core.range_parser import format_page_ranges, validate_page_ranges_realtime
+from core.word_converter import (
+    SUPPORTED_WORD_EXTENSIONS,
+    convert_word_batch,
+    convert_word_to_pdf,
+)
 from core.workers import AsyncTaskManager, PDFOperationWorker
 from ui.image_provider import PDFPageImageProvider
 
@@ -64,8 +71,9 @@ SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
     {".png", ".jpg", ".jpeg", ".webp"}
 )
 SUPPORTED_EXTENSIONS: frozenset[str] = (
-    SUPPORTED_PDF_EXTENSIONS | SUPPORTED_IMAGE_EXTENSIONS
+    SUPPORTED_PDF_EXTENSIONS | SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_WORD_EXTENSIONS
 )
+SHOW_FOLDER_DEBOUNCE_SECONDS: float = 0.8
 
 TOOLS_WITH_OPTIONS: frozenset[str] = frozenset(
     {"organize", "split", "compress", "pdf_to_images", "watermark", "sign"}
@@ -84,7 +92,7 @@ TOOLS_CATALOG: list[dict[str, str]] = [
         "title": "Dividir y Extraer",
         "subtitle": "Separa páginas por rangos exactos",
         "badge": "S",
-        "workspaceMode": "dropzone",
+        "workspaceMode": "split",
     },
     {
         "id": "organize",
@@ -127,6 +135,13 @@ TOOLS_CATALOG: list[dict[str, str]] = [
         "subtitle": "Trazo libre, lacre 'Aprobado' o firma PNG",
         "badge": "F",
         "workspaceMode": "viewer",
+    },
+    {
+        "id": "word_to_pdf",
+        "title": "Word a PDF",
+        "subtitle": "Convierte documentos .docx y .doc a PDF",
+        "badge": "D",
+        "workspaceMode": "dropzone",
     },
 ]
 
@@ -215,6 +230,7 @@ class StudioBridge(QObject):
         self._range_expr: str = "1-2"
         self._range_valid: bool = True
         self._range_feedback: str = "Ingresa un rango como '1-5, 8, 11-13'"
+        self._split_selected_indices: set[int] = set()
         self._split_separate: bool = False
         self._compression_level: str = CompressionLevel.RECOMMENDED.value
         self._compression_estimate_cache: dict[
@@ -243,6 +259,7 @@ class StudioBridge(QObject):
         self._last_output_file: str = ""
         self._last_output_file_path: str = ""
         self._last_output_folder: str = ""
+        self._last_show_folder_monotonic: float = 0.0
 
     # --- Propiedades de Navegación Contextual ("Suelta primero, elige después") ---
 
@@ -310,25 +327,30 @@ class StudioBridge(QObject):
             return "empty" if not self._queued_files else "single_pdf"
         pdf_count = 0
         img_count = 0
+        word_count = 0
         for qf in valid_files:
             ext = qf.file_path.suffix.lower()
             if ext in SUPPORTED_PDF_EXTENSIONS:
                 pdf_count += 1
             elif ext in SUPPORTED_IMAGE_EXTENSIONS:
                 img_count += 1
-        if pdf_count == 1 and img_count == 0:
+            elif ext in SUPPORTED_WORD_EXTENSIONS:
+                word_count += 1
+        if word_count >= 1 and pdf_count == 0 and img_count == 0:
+            return "word_only"
+        if pdf_count == 1 and img_count == 0 and word_count == 0:
             return "single_pdf"
-        if pdf_count >= 2 and img_count == 0:
+        if pdf_count >= 2 and img_count == 0 and word_count == 0:
             return "multi_pdf"
-        if img_count >= 1 and pdf_count == 0:
+        if img_count >= 1 and pdf_count == 0 and word_count == 0:
             return "images_only"
-        if pdf_count >= 1 and img_count >= 1:
+        if (pdf_count >= 1 or img_count >= 1 or word_count >= 1):
             return "mixed"
         return "empty"
 
     @Property(str, notify=filesChanged)
     def inputContextState(self) -> str:
-        """Estado contextual actual: 'empty', 'single_pdf', 'multi_pdf', 'images_only' o 'mixed'."""
+        """Estado contextual actual: 'empty', 'single_pdf', 'multi_pdf', 'images_only', 'word_only' o 'mixed'."""
         return self._compute_input_context_state()
 
     @Property(int, notify=filesChanged)
@@ -345,6 +367,14 @@ class StudioBridge(QObject):
             1
             for qf in self._valid_queued_files()
             if qf.file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+        )
+
+    @Property(int, notify=filesChanged)
+    def wordCount(self) -> int:
+        return sum(
+            1
+            for qf in self._valid_queued_files()
+            if qf.file_path.suffix.lower() in SUPPORTED_WORD_EXTENSIONS
         )
 
     @Property(bool, notify=filesChanged)
@@ -373,10 +403,18 @@ class StudioBridge(QObject):
         if state == "images_only":
             n = self.imageCount
             return f"{n} {'postal lista' if n == 1 else 'postales listas'}"
+        if state == "word_only":
+            n = self.wordCount
+            return f"{n} {'documento Word listo' if n == 1 else 'documentos Word listos'}"
         if state == "mixed":
-            p_word = "pliego" if self.pdfCount == 1 else "pliegos"
-            i_word = "postal" if self.imageCount == 1 else "postales"
-            return f"{self.pdfCount} {p_word} · {self.imageCount} {i_word}"
+            parts: list[str] = []
+            if self.pdfCount:
+                parts.append(f"{self.pdfCount} {'pliego' if self.pdfCount == 1 else 'pliegos'}")
+            if self.wordCount:
+                parts.append(f"{self.wordCount} Word")
+            if self.imageCount:
+                parts.append(f"{self.imageCount} {'postal' if self.imageCount == 1 else 'postales'}")
+            return " · ".join(parts)
         return "Mesa de Trabajo Floral"
 
     @Property(str, notify=filesChanged)
@@ -389,6 +427,10 @@ class StudioBridge(QObject):
         if state == "images_only":
             n = self.imageCount
             word = "postal" if n == 1 else "postales"
+            return f"{n} {word} · {size_str}"
+        if state == "word_only":
+            n = self.wordCount
+            word = "documento Word" if n == 1 else "documentos Word"
             return f"{n} {word} · {size_str}"
         n = len(self._queued_files)
         p = self.totalQueuedPages
@@ -465,13 +507,23 @@ class StudioBridge(QObject):
                 ),
             ]
 
-        # Caso 4: Mezcla de PDFs e imágenes
+        if state == "word_only":
+            # Caso 4: Uno o más documentos de Word (.docx, .doc)
+            return [
+                _make_card(
+                    "word_to_pdf",
+                    is_primary=True,
+                    override_subtitle="Convierte documentos Word (.docx/.doc) a PDF usando Microsoft Word",
+                ),
+            ]
+
+        # Caso 5: Mezcla de PDFs, Word e imágenes
         return [
             _make_card(
                 "merge",
                 is_primary=True,
                 override_title="Unir Todo en un PDF",
-                override_subtitle="Convierte e integra PDFs y postales en un solo cuaderno",
+                override_subtitle="Convierte e integra PDFs, Word y postales en un solo cuaderno",
             ),
         ]
 
@@ -659,6 +711,10 @@ class StudioBridge(QObject):
         if tool == "images_to_pdf":
             word = "postal" if n_imgs == 1 else "postales"
             return f"Encuadernar {n_imgs} {word}"
+        if tool == "word_to_pdf":
+            n_words = max(1, self.wordCount)
+            word = "documento Word" if n_words == 1 else "documentos Word"
+            return f"Convertir {n_words} {word}"
         if tool == "pdf_to_images":
             return "Revelar páginas"
         if tool == "watermark":
@@ -707,7 +763,7 @@ class StudioBridge(QObject):
             self._active_tool == ToolType.MERGE.value
             and self._compute_input_context_state() == "mixed"
         ):
-            return "Convierte e integra PDFs y postales en un solo cuaderno"
+            return "Convierte e integra PDFs, Word y postales en un solo cuaderno"
         for item in TOOLS_CATALOG:
             if item["id"] == self._active_tool:
                 return item["subtitle"]
@@ -753,9 +809,10 @@ class StudioBridge(QObject):
         for idx, qf in enumerate(self._queued_files):
             ext = qf.file_path.suffix.lower()
             is_img = ext in SUPPORTED_IMAGE_EXTENSIONS
+            is_word = ext in SUPPORTED_WORD_EXTENSIONS
             is_corrupted = qf.status == "No se pudo leer"
             is_locked = bool(qf.is_encrypted and qf.file_path.resolve() not in self._passwords)
-            if is_corrupted:
+            if is_corrupted or is_word:
                 thumb_url = ""
             elif is_img:
                 thumb_url = QUrl.fromLocalFile(str(qf.file_path.resolve())).toString()
@@ -775,6 +832,7 @@ class StudioBridge(QObject):
                     "isLocked": is_locked,
                     "isCorrupted": is_corrupted,
                     "isImage": is_img,
+                    "isWord": is_word,
                     "status": qf.status,
                     "thumbnailUrl": thumb_url,
                 }
@@ -857,6 +915,20 @@ class StudioBridge(QObject):
                 added_any = True
                 continue
 
+            if ext in SUPPORTED_WORD_EXTENSIONS:
+                self._queued_files.append(
+                    QueuedFile(
+                        file_path=local_path,
+                        original_size_bytes=size_b,
+                        page_count=0,
+                        is_encrypted=False,
+                        status="Documento Word",
+                    )
+                )
+                existing_resolved.add(resolved_path)
+                added_any = True
+                continue
+
             try:
                 saved_pwd = self._passwords.get(resolved_path)
                 info = _pdf_engine_module().inspect_pdf_file(
@@ -895,7 +967,7 @@ class StudioBridge(QObject):
             if len(unsupported_names) > 3:
                 joined += f" y {len(unsupported_names) - 3} más"
             self._emit_error(
-                f"Formato no compatible ignorado ({joined}). Solo se admiten pliegos PDF e imágenes PNG, JPG o WEBP."
+                f"Formato no compatible ignorado ({joined}). Solo se admiten pliegos PDF, documentos Word (.docx/.doc) e imágenes PNG, JPG o WEBP."
             )
 
         if added_any:
@@ -945,6 +1017,25 @@ class StudioBridge(QObject):
             qf
             for qf in self._queued_files
             if qf.file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+        ]
+        if len(filtered) != len(self._queued_files):
+            self._queued_files = filtered
+            self._rebuild_pages_from_primary_file()
+            self._revalidate_range()
+            self._sync_contextual_tool_after_queue_change()
+            self._update_ready_status_message()
+            self._schedule_compression_estimation()
+            self.filesChanged.emit()
+            self.activeToolChanged.emit()
+            self.configChanged.emit()
+
+    @Slot()
+    def keepOnlyWord(self) -> None:
+        """Filtra la cola actual conservando únicamente los documentos Word (.docx/.doc)."""
+        filtered = [
+            qf
+            for qf in self._queued_files
+            if qf.file_path.suffix.lower() in SUPPORTED_WORD_EXTENSIONS
         ]
         if len(filtered) != len(self._queued_files):
             self._queued_files = filtered
@@ -1811,9 +1902,73 @@ class StudioBridge(QObject):
 
     def _revalidate_range(self) -> None:
         max_pages = self.primaryDocumentPageCount or 20
-        ok, msg, _ = validate_page_ranges_realtime(self._range_expr, max_pages)
+        ok, msg, indices = validate_page_ranges_realtime(self._range_expr, max_pages)
         self._range_valid = ok
         self._range_feedback = msg
+        self._split_selected_indices = set(indices) if ok else set()
+
+    @Property("QVariantList", notify=configChanged)
+    def splitPages(self) -> list[dict[str, Any]]:
+        """Miniaturas de páginas del PDF principal para selección visual en Dividir y Extraer."""
+        valid_files = self._valid_queued_files()
+        if not valid_files:
+            return []
+        primary = next(
+            (qf for qf in valid_files if qf.file_path.suffix.lower() in SUPPORTED_PDF_EXTENSIONS),
+            valid_files[0],
+        )
+        if primary.page_count < 1 or primary.file_path.suffix.lower() != ".pdf":
+            return []
+        encoded_path = quote(str(primary.file_path.resolve()))
+        return [
+            {
+                "pageIndex": idx,
+                "pageNumber": idx + 1,
+                "selected": idx in self._split_selected_indices,
+                "thumbnailUrl": f"image://pdfpage/{idx}?path={encoded_path}&dpi=72",
+            }
+            for idx in range(primary.page_count)
+        ]
+
+    @Property(int, notify=configChanged)
+    def splitSelectedCount(self) -> int:
+        max_pages = self.primaryDocumentPageCount
+        if max_pages <= 0:
+            return 0
+        return sum(1 for idx in self._split_selected_indices if 0 <= idx < max_pages)
+
+    @Slot(int)
+    def toggleSplitPage(self, page_index: int) -> None:
+        """Alterna la selección de una hoja en Dividir y Extraer y sincroniza el rango."""
+        max_pages = self.primaryDocumentPageCount
+        if page_index < 0 or page_index >= max_pages:
+            return
+        if page_index in self._split_selected_indices:
+            self._split_selected_indices.remove(page_index)
+        else:
+            self._split_selected_indices.add(page_index)
+        self._range_expr = format_page_ranges(sorted(self._split_selected_indices))
+        self._revalidate_range()
+        self.configChanged.emit()
+
+    @Slot()
+    def selectAllSplitPages(self) -> None:
+        """Selecciona todas las páginas del documento principal en Dividir y Extraer."""
+        max_pages = self.primaryDocumentPageCount
+        if max_pages <= 0:
+            return
+        self._split_selected_indices = set(range(max_pages))
+        self._range_expr = format_page_ranges(list(range(max_pages)))
+        self._revalidate_range()
+        self.configChanged.emit()
+
+    @Slot()
+    def clearSplitSelection(self) -> None:
+        """Limpia la selección visual de páginas y vacía el rango en Dividir y Extraer."""
+        self._split_selected_indices.clear()
+        self._range_expr = ""
+        self._revalidate_range()
+        self.configChanged.emit()
 
     @Property(bool, notify=configChanged)
     def splitSeparateFiles(self) -> bool:
@@ -2200,11 +2355,19 @@ class StudioBridge(QObject):
             for qf in valid_files
             if qf.file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
         ]
+        word_paths = [
+            qf.file_path
+            for qf in valid_files
+            if qf.file_path.suffix.lower() in SUPPORTED_WORD_EXTENSIONS
+        ]
         tool = self._active_tool
 
         if tool == ToolType.MERGE.value:
-            suffix = "_integrado" if (img_paths and pdf_paths) else "_unido"
+            suffix = "_integrado" if (img_paths or word_paths) else "_unido"
             return (f"{primary_file.stem}{suffix}", ".pdf")
+        if tool == ToolType.WORD_TO_PDF.value:
+            target = word_paths[0] if word_paths else primary_file
+            return (target.stem, ".pdf")
         if tool == ToolType.SPLIT.value:
             target = pdf_paths[0] if pdf_paths else primary_file
             return (f"{target.stem}_extraido", ".pdf")
@@ -2269,13 +2432,16 @@ class StudioBridge(QObject):
     @Property(bool, notify=configChanged)
     def isBatchMultiFileOutput(self) -> bool:
         return (
-            self._active_tool
-            in {
-                ToolType.COMPRESS.value,
-                ToolType.PDF_TO_IMAGES.value,
-                ToolType.WATERMARK.value,
-            }
-            and self.pdfCount > 1
+            (
+                self._active_tool
+                in {
+                    ToolType.COMPRESS.value,
+                    ToolType.PDF_TO_IMAGES.value,
+                    ToolType.WATERMARK.value,
+                }
+                and self.pdfCount > 1
+            )
+            or (self._active_tool == ToolType.WORD_TO_PDF.value and self.wordCount > 1)
         )
 
     @Slot(str)
@@ -2435,7 +2601,7 @@ class StudioBridge(QObject):
         on_progress: Any = None,
         is_cancelled: Any = None,
     ) -> OperationResult:
-        """Une e integra archivos PDF e imágenes (.png/.jpg/.jpeg/.webp) en un único PDF."""
+        """Une e integra archivos PDF, documentos Word (.docx/.doc) e imágenes en un único PDF."""
         import pymupdf as fitz
 
         passwords = passwords or {}
@@ -2443,44 +2609,58 @@ class StudioBridge(QObject):
         total_files = len(input_files)
         merged_doc = fitz.open()
         try:
-            for idx, item_path in enumerate(input_files):
-                if is_cancelled is not None and is_cancelled():
-                    raise TaskCancelledError("Operación cancelada por el usuario.")
-                path = Path(item_path)
-                total_original_bytes += path.stat().st_size
-                ext = path.suffix.lower()
+            with tempfile.TemporaryDirectory(prefix="floral_word_merge_") as temp_dir_str:
+                temp_dir = Path(temp_dir_str)
+                for idx, item_path in enumerate(input_files):
+                    if is_cancelled is not None and is_cancelled():
+                        raise TaskCancelledError("Operación cancelada por el usuario.")
+                    path = Path(item_path)
+                    total_original_bytes += path.stat().st_size
+                    ext = path.suffix.lower()
 
-                if ext in SUPPORTED_PDF_EXTENSIONS:
-                    pwd = passwords.get(path) or passwords.get(path.resolve())
-                    src_doc = fitz.open(path)
-                    try:
-                        if src_doc.needs_pass and pwd:
-                            src_doc.authenticate(pwd)
-                        merged_doc.insert_pdf(src_doc)
-                    finally:
-                        src_doc.close()
-                else:
-                    img_doc = fitz.open(path)
-                    try:
-                        pdf_bytes = img_doc.convert_to_pdf()
-                        img_pdf = fitz.open("pdf", pdf_bytes)
+                    if ext in SUPPORTED_PDF_EXTENSIONS:
+                        pwd = passwords.get(path) or passwords.get(path.resolve())
+                        src_doc = fitz.open(path)
                         try:
-                            merged_doc.insert_pdf(img_pdf)
+                            if src_doc.needs_pass and pwd:
+                                src_doc.authenticate(pwd)
+                            merged_doc.insert_pdf(src_doc)
                         finally:
-                            img_pdf.close()
-                    finally:
-                        img_doc.close()
+                            src_doc.close()
+                    elif ext in SUPPORTED_WORD_EXTENSIONS:
+                        temp_pdf = temp_dir / f"word_{idx}_{path.stem}.pdf"
+                        convert_word_to_pdf(
+                            path,
+                            temp_pdf,
+                            is_cancelled=is_cancelled,
+                        )
+                        word_pdf = fitz.open(temp_pdf)
+                        try:
+                            merged_doc.insert_pdf(word_pdf)
+                        finally:
+                            word_pdf.close()
+                    else:
+                        img_doc = fitz.open(path)
+                        try:
+                            pdf_bytes = img_doc.convert_to_pdf()
+                            img_pdf = fitz.open("pdf", pdf_bytes)
+                            try:
+                                merged_doc.insert_pdf(img_pdf)
+                            finally:
+                                img_pdf.close()
+                        finally:
+                            img_doc.close()
 
-                if on_progress is not None:
-                    pct = int(((idx + 1) / total_files) * 88)
-                    on_progress(pct, f"Integrando '{path.name}' ({idx + 1}/{total_files})...")
+                    if on_progress is not None:
+                        pct = int(((idx + 1) / total_files) * 88)
+                        on_progress(pct, f"Integrando '{path.name}' ({idx + 1}/{total_files})...")
 
             safe_dest = _pdf_engine_module().ensure_safe_output_path(
                 Path(input_files[0]), output_path, default_suffix="_integrado"
             )
             merged_doc.save(str(safe_dest), deflate=True)
             if on_progress is not None:
-                on_progress(100, "Documentos e imágenes integrados en un PDF.")
+                on_progress(100, "Documentos integrados en un PDF.")
             final_bytes = safe_dest.stat().st_size
             return OperationResult(
                 tool=ToolType.MERGE,
@@ -2488,7 +2668,7 @@ class StudioBridge(QObject):
                 original_size_bytes=total_original_bytes,
                 final_size_bytes=final_bytes,
                 saved_percentage=0.0,
-                message=f"Se integraron {total_files} archivos (PDF e imágenes) en '{safe_dest.name}'.",
+                message=f"Se integraron {total_files} archivos en '{safe_dest.name}'.",
             )
         finally:
             merged_doc.close()
@@ -2633,9 +2813,37 @@ class StudioBridge(QObject):
             for qf in valid_files
             if qf.file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
         ]
+        word_paths = [
+            qf.file_path
+            for qf in valid_files
+            if qf.file_path.suffix.lower() in SUPPORTED_WORD_EXTENSIONS
+        ]
 
         suggested_stem, target_ext = self._output_target_spec()
         desired_stem = self._resolve_effective_output_stem(suggested_stem, target_ext)
+
+        if tool == ToolType.WORD_TO_PDF:
+            target_words = word_paths or [qf.file_path for qf in valid_files]
+            if len(target_words) > 1:
+                custom_base = self._custom_output_name if self._output_name_user_edited else ""
+                return PDFOperationWorker(
+                    convert_word_batch,
+                    target_words,
+                    out_dir,
+                    custom_base_name=custom_base,
+                )
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                suggested_stem,
+                extension=".pdf",
+                protected_inputs=protected_inputs,
+            )
+            return PDFOperationWorker(
+                convert_word_to_pdf,
+                target_words[0],
+                dest,
+            )
 
         if tool == ToolType.MERGE:
             all_paths = [qf.file_path for qf in valid_files]
@@ -2646,7 +2854,7 @@ class StudioBridge(QObject):
                 extension=".pdf",
                 protected_inputs=protected_inputs,
             )
-            if img_paths and pdf_paths:
+            if img_paths or word_paths:
                 return PDFOperationWorker(
                     self._merge_mixed_files_task,
                     all_paths,
@@ -2940,9 +3148,57 @@ class StudioBridge(QObject):
             self._emit_error(f"No se pudo abrir '{target_path.name}': {exc}")
             return False
 
+    @staticmethod
+    def _open_folder_and_select_item_win(target_path: Path) -> bool:
+        """Abre o enfoca la carpeta en el Explorador de Windows seleccionando el archivo vía Shell COM."""
+        if not sys.platform.startswith("win"):
+            return False
+
+        ole32 = ctypes.windll.ole32  # type: ignore[attr-defined]
+        shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
+
+        ole32.CoInitialize.argtypes = [ctypes.c_void_p]
+        ole32.CoInitialize.restype = ctypes.c_long
+        ole32.CoUninitialize.argtypes = []
+        ole32.CoUninitialize.restype = None
+
+        shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
+        shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+        shell32.ILFree.argtypes = [ctypes.c_void_p]
+        shell32.ILFree.restype = None
+        shell32.SHOpenFolderAndSelectItems.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+        ]
+        shell32.SHOpenFolderAndSelectItems.restype = ctypes.c_long
+
+        hr_init = ole32.CoInitialize(None)
+        should_uninit = hr_init in (0, 1)  # S_OK o S_FALSE
+        pidl = None
+        try:
+            pidl = shell32.ILCreateFromPathW(str(target_path.resolve()))
+            if not pidl:
+                return False
+            hr = shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+            return hr == 0
+        except Exception:
+            return False
+        finally:
+            if pidl:
+                shell32.ILFree(pidl)
+            if should_uninit:
+                ole32.CoUninitialize()
+
     @Slot(str, result=bool)
     def showFileInFolder(self, file_or_folder_str: str = "") -> bool:
-        """Abre la carpeta de destino en el Explorador seleccionando el archivo cuando existe."""
+        """Abre la carpeta de destino en el Explorador reutilizando la ventana existente si está abierta."""
+        now = time.monotonic()
+        if (now - self._last_show_folder_monotonic) < SHOW_FOLDER_DEBOUNCE_SECONDS:
+            return True
+        self._last_show_folder_monotonic = now
+
         raw = (
             (file_or_folder_str or "").strip()
             or self._last_output_file_path
@@ -2956,23 +3212,21 @@ class StudioBridge(QObject):
 
         if sys.platform.startswith("win"):
             if target_path.exists() and target_path.is_file():
-                try:
-                    subprocess.Popen(["explorer", "/select,", str(target_path)])
+                if self._open_folder_and_select_item_win(target_path):
                     return True
-                except OSError:
-                    if target_path.parent.exists():
-                        try:
-                            os.startfile(str(target_path.parent))  # type: ignore[attr-defined]
-                            return True
-                        except OSError as exc:
-                            self._emit_error(
-                                f"No se pudo abrir la carpeta '{target_path.parent}': {exc}"
-                            )
-                            return False
-                    self._emit_error(
-                        f"No se pudo abrir el Explorador para '{target_path}'."
-                    )
-                    return False
+                if target_path.parent.exists():
+                    try:
+                        os.startfile(str(target_path.parent))  # type: ignore[attr-defined]
+                        return True
+                    except OSError as exc:
+                        self._emit_error(
+                            f"No se pudo abrir la carpeta '{target_path.parent}': {exc}"
+                        )
+                        return False
+                self._emit_error(
+                    f"No se pudo abrir el Explorador para '{target_path}'."
+                )
+                return False
 
             if target_path.exists() and target_path.is_dir():
                 try:

@@ -92,3 +92,26 @@ def validate_page_ranges_realtime(
     except InvalidPageRangeError as exc:
         return (False, str(exc), [])
 
+
+def format_page_ranges(indices_0_based: list[int]) -> str:
+    """Convierte una lista de índices 0-based en una expresión compacta 1-based (ej. '1-3, 5')."""
+    unique_sorted = sorted({idx for idx in indices_0_based if idx >= 0})
+    if not unique_sorted:
+        return ""
+
+    ranges: list[str] = []
+    start = unique_sorted[0]
+    end = unique_sorted[0]
+
+    for idx in unique_sorted[1:]:
+        if idx == end + 1:
+            end = idx
+        else:
+            ranges.append(f"{start + 1}-{end + 1}" if start != end else f"{start + 1}")
+            start = idx
+            end = idx
+
+    ranges.append(f"{start + 1}-{end + 1}" if start != end else f"{start + 1}")
+    return ", ".join(ranges)
+
+

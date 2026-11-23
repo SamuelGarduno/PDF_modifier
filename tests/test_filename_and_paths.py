@@ -154,32 +154,32 @@ def test_bridge_last_output_file_path_and_safe_open_in_windows(
     assert bridge.fileCount == 0
     assert bridge.lastOutputFilePath == str(generated_path)
 
-    # Simular entorno Windows y verificar os.startfile / subprocess.Popen con la ruta normalizada
+    # Simular entorno Windows y verificar os.startfile / _open_folder_and_select_item_win con la ruta normalizada
     monkeypatch.setattr(sys, "platform", "win32")
     started_paths: list[str] = []
-    popen_cmds: list[list[str]] = []
+    selected_paths: list[Path] = []
+    clock = {"t": 100.0}
 
     def _fake_startfile(path_arg: str) -> None:
         started_paths.append(path_arg)
 
-    def _fake_popen(cmd: list[str], *_args, **_kwargs):
-        popen_cmds.append(cmd)
-        return object()
+    def _fake_shell_select(path_arg: Path) -> bool:
+        selected_paths.append(path_arg)
+        return True
 
     monkeypatch.setattr(os, "startfile", _fake_startfile, raising=False)
-    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr("ui.bridge.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr(bridge, "_open_folder_and_select_item_win", _fake_shell_select)
 
     assert bridge.openFileInSystem("") is True
     assert started_paths[-1] == str(generated_path)
 
     assert bridge.showFileInFolder("") is True
-    assert popen_cmds[-1] == ["explorer", "/select,", str(generated_path)]
+    assert selected_paths[-1] == generated_path
 
-    # Si explorer /select falla con OSError, debe hacer fallback a os.startfile(parent)
-    def _failing_popen(*_args, **_kwargs):
-        raise OSError("Explorer no disponible")
-
-    monkeypatch.setattr(subprocess, "Popen", _failing_popen)
+    # Si Shell API devuelve False, debe hacer fallback a os.startfile(parent)
+    clock["t"] = 102.0
+    monkeypatch.setattr(bridge, "_open_folder_and_select_item_win", lambda _p: False)
     assert bridge.showFileInFolder(bridge.lastOutputFilePath) is True
     assert started_paths[-1] == str(generated_path.parent)
 
@@ -191,5 +191,6 @@ def test_bridge_last_output_file_path_and_safe_open_in_windows(
     assert errors and "No se encontró el archivo" in errors[-1]
 
     # showFileInFolder con archivo faltante pero carpeta existente hace fallback seguro a la carpeta
+    clock["t"] = 104.0
     assert bridge.showFileInFolder(bridge.lastOutputFilePath) is True
     assert started_paths[-1] == str(generated_path.parent)

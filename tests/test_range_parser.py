@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from core.exceptions import InvalidPageRangeError
-from core.range_parser import parse_page_ranges, validate_page_ranges_realtime
+from core.range_parser import (
+    format_page_ranges,
+    parse_page_ranges,
+    validate_page_ranges_realtime,
+)
 
 
 def test_parse_valid_mixed_ranges() -> None:
@@ -53,4 +57,14 @@ def test_validate_realtime_helper() -> None:
     assert ok_bad is False
     assert indices_bad == []
     assert "invertido" in msg_bad.lower()
+
+
+def test_format_page_ranges() -> None:
+    """Verifica el formateo inverso de índices 0-based a rangos compactos 1-based."""
+    assert format_page_ranges([]) == ""
+    assert format_page_ranges([0, 1, 2, 4]) == "1-3, 5"
+    assert format_page_ranges([4, 0, 2, 1, 2, -1]) == "1-3, 5"
+    assert format_page_ranges([0]) == "1"
+    assert format_page_ranges([0, 2, 4]) == "1, 3, 5"
+
 

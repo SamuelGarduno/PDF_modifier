@@ -1740,7 +1740,7 @@ class PDFEngine:
 
         # 2. Sello opcional con texto libre (sin fondo rosado opaco ni borde rectangular que recorte)
         if overlay.stamp_label and overlay.stamp_label.strip():
-            stamp_text = f"✦ {overlay.stamp_label.strip()} ✦"
+            stamp_text = overlay.stamp_label.strip()
             font = QFont("Georgia")
             font.setBold(True)
             font_px = max(12, int(rh * 0.36))

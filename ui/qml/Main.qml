@@ -442,6 +442,11 @@ Window {
                         visible: studioBridge.isToolSelected && studioBridge.workspaceMode === "organizer" && studioBridge.fileCount > 0
                     }
 
+                    SplitPagesView {
+                        anchors.fill: parent
+                        visible: studioBridge.isToolSelected && studioBridge.workspaceMode === "split" && studioBridge.fileCount > 0
+                    }
+
                     PdfViewerSignView {
                         anchors.fill: parent
                         visible: studioBridge.isToolSelected && studioBridge.workspaceMode === "viewer" && studioBridge.fileCount > 0

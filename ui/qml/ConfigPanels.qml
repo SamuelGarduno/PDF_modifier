@@ -70,11 +70,21 @@ Rectangle {
                     anchors.fill: parent
                     anchors.margins: 8
                     verticalAlignment: TextInput.AlignVCenter
+                    selectByMouse: true
                     text: studioBridge.rangeExpr
                     font.family: Theme.sansFont
                     font.pixelSize: Theme.fontBodySize
                     color: Theme.textPrimary
                     onTextEdited: studioBridge.setRangeExpr(text)
+
+                    Connections {
+                        target: studioBridge
+                        function onConfigChanged() {
+                            if (!rangeField.activeFocus && rangeField.text !== studioBridge.rangeExpr) {
+                                rangeField.text = studioBridge.rangeExpr
+                            }
+                        }
+                    }
                 }
             }
 
