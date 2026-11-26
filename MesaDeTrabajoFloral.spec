@@ -17,6 +17,7 @@ hidden_imports = [
     "pymupdf",
     "PIL",
     "PIL.Image",
+    "PIL.ImageOps",
     "PIL.IcoImagePlugin",
     "PIL.WebPImagePlugin",
     "PIL.PngImagePlugin",

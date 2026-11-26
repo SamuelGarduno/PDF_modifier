@@ -15,7 +15,9 @@ Rectangle {
                                                 || studioBridge.activeTool === "watermark")
 
     visible: hasActiveConfig
-    implicitHeight: (studioBridge.activeTool === "compress" && studioBridge.isTargetSizeMode) ? 116 : 72
+    implicitHeight: studioBridge.activeTool === "compress"
+                    ? (studioBridge.isTargetSizeMode ? 96 : 78)
+                    : 72
     radius: 14
     color: Theme.stationeryFrameBg
     border.width: Theme.borderSubtleWidth
@@ -103,36 +105,19 @@ Rectangle {
         ColumnLayout {
             visible: studioBridge.activeTool === "compress"
             anchors.fill: parent
-            spacing: 8
+            spacing: 6
 
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 10
 
-                Column {
-                    spacing: 2
+                Text {
+                    text: "Nivel de compresión:"
+                    font.family: Theme.sansFont
+                    font.pixelSize: Theme.fontBodySize
+                    font.bold: true
+                    color: Theme.textPrimary
                     Layout.alignment: Qt.AlignVCenter
-
-                    Text {
-                        text: "Nivel de compresión:"
-                        font.family: Theme.sansFont
-                        font.pixelSize: Theme.fontBodySize
-                        font.bold: true
-                        color: Theme.textPrimary
-                    }
-
-                    Text {
-                        id: compressionEstimateText
-                        objectName: "compressionEstimateText"
-                        text: studioBridge.estimatedCompressionSummary
-                        font.family: Theme.scriptFont
-                        font.italic: true
-                        font.pixelSize: Theme.fontMetaSize
-                        color: Theme.textPrimary
-                        opacity: Theme.metaOpacity
-                        elide: Text.ElideRight
-                        width: Math.min(implicitWidth, 250)
-                    }
                 }
 
                 Row {
@@ -204,6 +189,21 @@ Rectangle {
                 }
 
                 Item { Layout.fillWidth: true }
+            }
+
+            // Fila dedicada al texto de estimación para evitar truncamiento con los 4 botones
+            Text {
+                id: compressionEstimateText
+                objectName: "compressionEstimateText"
+                visible: !studioBridge.isTargetSizeMode
+                Layout.fillWidth: true
+                text: studioBridge.estimatedCompressionSummary
+                font.family: Theme.scriptFont
+                font.italic: true
+                font.pixelSize: Theme.fontMetaSize
+                color: Theme.textPrimary
+                opacity: Theme.metaOpacity
+                elide: Text.ElideRight
             }
 
             RowLayout {
