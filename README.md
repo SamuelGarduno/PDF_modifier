@@ -47,7 +47,7 @@ Tus archivos **nunca se suben a ningún servidor** ni se modifican los originale
 
 | Herramienta | Qué puedes hacer |
 | :--- | :--- |
-| **Comprimir PDF** | Reduce el peso del archivo para enviarlo fácil por correo o WhatsApp, eligiendo entre tres niveles reales (*Extrema*, *Recomendada* y *Baja pérdida*) con estimación previa del ahorro. Si ya es muy ligero, te avisa sin dañarlo. |
+| **Comprimir PDF** | Reduce el peso del archivo para enviarlo fácil por correo o WhatsApp, eligiendo entre tres niveles reales (*Extrema*, *Recomendada* y *Baja pérdida*) con estimación previa o indicando un **tamaño máximo (MB)** (con búsqueda automática de la mejor calidad legible y opciones de rescate como blanco y negro, quitar páginas en blanco o dividir en partes). Si ya es muy ligero, te avisa sin dañarlo. |
 | **PDF a Imágenes** | Convierte cada página de un documento PDF en imágenes individuales en formato **PNG** o **JPG**. |
 | **Imágenes a PDF** | Transforma una o varias fotos e imágenes (`PNG`, `JPG`, `JPEG`, `WEBP`) en un solo documento PDF. |
 | **Word a PDF** | Convierte documentos **`.docx` y `.doc`** a PDF (o los integra junto con PDFs e imágenes al unir). *Requiere tener Microsoft Word instalado en el equipo.* |

@@ -176,3 +176,163 @@ class OperationResult:
     saved_percentage: float
     message: str
 
+
+DECIMAL_MB_BYTES: int = 1_000_000
+TARGET_SIZE_SAFETY_FACTOR: float = 0.95
+TARGET_SIZE_MIN_MB: float = 0.2
+TARGET_SIZE_MAX_MB: float = 500.0
+TARGET_SIZE_PRESETS_MB: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0)
+TEXT_HEAVY_IMAGE_RATIO_THRESHOLD: float = 0.15
+SINGLE_LARGE_IMAGE_RATIO_THRESHOLD: float = 0.70
+BLANK_PAGE_RENDER_DPI: int = 36
+BLANK_PAGE_NON_WHITE_THRESHOLD: int = 245
+BLANK_PAGE_MAX_INK_RATIO: float = 0.003
+SAMPLE_ESTIMATION_MIN_PAGES: int = 6
+SAMPLE_ESTIMATION_MAX_PAGES: int = 5
+SAMPLE_PIVOT_STEP_INDEX: int = 3
+
+
+class TargetQualityLabel(StrEnum):
+    """Etiquetas de legibilidad resultantes para compresión por tamaño objetivo."""
+
+    VERY_GOOD = "Muy buena"
+    GOOD = "Buena"
+    READABLE = "Legible"
+
+
+@dataclass(frozen=True, slots=True)
+class TargetCompressionStep:
+    """Escalón discreto dentro de la escalera ordenada de compresión objetivo."""
+
+    index: int
+    quality_label: TargetQualityLabel
+    structural_only: bool
+    jpeg_quality: int
+    dpi_threshold: float
+    dpi_target: float
+    max_side_px: int
+    garbage: int = 4
+    use_objstms: int = 1
+    strip_metadata: bool = False
+    strip_xml_metadata: bool = True
+
+
+TARGET_COMPRESSION_LADDER: tuple[TargetCompressionStep, ...] = (
+    TargetCompressionStep(
+        index=0,
+        quality_label=TargetQualityLabel.VERY_GOOD,
+        structural_only=True,
+        jpeg_quality=95,
+        dpi_threshold=9999.0,
+        dpi_target=9999.0,
+        max_side_px=10000,
+        garbage=4,
+        use_objstms=1,
+        strip_metadata=False,
+        strip_xml_metadata=True,
+    ),
+    TargetCompressionStep(
+        index=1,
+        quality_label=TargetQualityLabel.VERY_GOOD,
+        structural_only=False,
+        jpeg_quality=85,
+        dpi_threshold=220.0,
+        dpi_target=200.0,
+        max_side_px=4000,
+        garbage=4,
+        use_objstms=1,
+        strip_metadata=False,
+        strip_xml_metadata=True,
+    ),
+    TargetCompressionStep(
+        index=2,
+        quality_label=TargetQualityLabel.VERY_GOOD,
+        structural_only=False,
+        jpeg_quality=78,
+        dpi_threshold=180.0,
+        dpi_target=165.0,
+        max_side_px=3400,
+        garbage=4,
+        use_objstms=1,
+        strip_metadata=False,
+        strip_xml_metadata=True,
+    ),
+    TargetCompressionStep(
+        index=3,
+        quality_label=TargetQualityLabel.GOOD,
+        structural_only=False,
+        jpeg_quality=68,
+        dpi_threshold=150.0,
+        dpi_target=140.0,
+        max_side_px=2800,
+        garbage=4,
+        use_objstms=1,
+        strip_metadata=True,
+        strip_xml_metadata=True,
+    ),
+    TargetCompressionStep(
+        index=4,
+        quality_label=TargetQualityLabel.READABLE,
+        structural_only=False,
+        jpeg_quality=55,
+        dpi_threshold=120.0,
+        dpi_target=110.0,
+        max_side_px=2200,
+        garbage=4,
+        use_objstms=1,
+        strip_metadata=True,
+        strip_xml_metadata=True,
+    ),
+    TargetCompressionStep(
+        index=5,
+        quality_label=TargetQualityLabel.READABLE,
+        structural_only=False,
+        jpeg_quality=42,
+        dpi_threshold=92.0,
+        dpi_target=85.0,
+        max_side_px=1650,
+        garbage=4,
+        use_objstms=1,
+        strip_metadata=True,
+        strip_xml_metadata=True,
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class WeightAnatomy:
+    """Diagnóstico de composición texto/vectores frente a imágenes de un PDF."""
+
+    original_bytes: int
+    image_bytes: int
+    non_image_bytes: int
+    image_ratio: float
+    unique_image_count: int
+    page_count: int
+    is_text_heavy: bool
+    is_single_large_image: bool
+    page_image_bytes: dict[int, int]
+    advisory_message: str
+
+
+@dataclass(slots=True)
+class TargetCompressionResult:
+    """Resultado detallado de la compresión por tamaño objetivo (MB)."""
+
+    met_target: bool
+    already_within_limit: bool
+    target_mb: float
+    target_bytes: int
+    original_size_bytes: int
+    best_size_bytes: int
+    best_step_index: int
+    quality_label: str
+    passes_executed: int
+    anatomy: WeightAnatomy
+    message: str
+    comparison_text: str
+    best_pdf_bytes: bytes | None = None
+    operation_result: OperationResult | None = None
+    grayscale_applied: bool = False
+    removed_blank_pages: int = 0
+

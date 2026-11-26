@@ -15,6 +15,7 @@ Rectangle {
                                                 || studioBridge.activeTool === "watermark")
 
     visible: hasActiveConfig
+    implicitHeight: (studioBridge.activeTool === "compress" && studioBridge.isTargetSizeMode) ? 116 : 72
     radius: 14
     color: Theme.stationeryFrameBg
     border.width: Theme.borderSubtleWidth
@@ -98,75 +99,228 @@ Rectangle {
             Item { Layout.fillWidth: true }
         }
 
-        // 2. COMPRESS: Nivel de compresión con cálculo estimado de reducción
-        RowLayout {
+        // 2. COMPRESS: Nivel de compresión clásico o Tamaño máximo (MB)
+        ColumnLayout {
             visible: studioBridge.activeTool === "compress"
             anchors.fill: parent
-            spacing: 16
+            spacing: 8
 
-            Column {
-                spacing: 4
-                Layout.alignment: Qt.AlignVCenter
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
 
-                Text {
-                    text: "Nivel de compresión:"
-                    font.family: Theme.sansFont
-                    font.pixelSize: Theme.fontBodySize
-                    font.bold: true
-                    color: Theme.textPrimary
+                Column {
+                    spacing: 2
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                        text: "Nivel de compresión:"
+                        font.family: Theme.sansFont
+                        font.pixelSize: Theme.fontBodySize
+                        font.bold: true
+                        color: Theme.textPrimary
+                    }
+
+                    Text {
+                        id: compressionEstimateText
+                        objectName: "compressionEstimateText"
+                        text: studioBridge.estimatedCompressionSummary
+                        font.family: Theme.scriptFont
+                        font.italic: true
+                        font.pixelSize: Theme.fontMetaSize
+                        color: Theme.textPrimary
+                        opacity: Theme.metaOpacity
+                        elide: Text.ElideRight
+                        width: Math.min(implicitWidth, 250)
+                    }
                 }
 
-                Text {
-                    id: compressionEstimateText
-                    objectName: "compressionEstimateText"
-                    text: studioBridge.estimatedCompressionSummary
-                    font.family: Theme.scriptFont
-                    font.italic: true
-                    font.pixelSize: Theme.fontMetaSize
-                    color: Theme.textPrimary
-                    opacity: Theme.metaOpacity
-                    elide: Text.ElideRight
-                    width: Math.min(implicitWidth, 340)
-                }
-            }
+                Row {
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+                    Repeater {
+                        model: studioBridge.compressionLevelOptions
+                        delegate: Rectangle {
+                            readonly property bool isLevelActive: !studioBridge.isTargetSizeMode
+                                                                  && studioBridge.compressionLevel === modelData.key
+                            objectName: "compressLevelBtn_" + modelData.key
+                            width: Math.max(114, levelBtnText.implicitWidth + 20)
+                            height: 32
+                            radius: 16
+                            color: isLevelActive
+                                   ? Theme.secondaryWine
+                                   : Theme.surfaceElevated
+                            border.width: Theme.borderSubtleWidth
+                            border.color: isLevelActive
+                                          ? Theme.secondaryWine
+                                          : Theme.borderSubtleColor
 
-            Row {
-                spacing: 8
-                Layout.alignment: Qt.AlignVCenter
-                Repeater {
-                    model: studioBridge.compressionLevelOptions
-                    delegate: Rectangle {
-                        objectName: "compressLevelBtn_" + modelData.key
-                        width: Math.max(136, levelBtnText.implicitWidth + 24)
-                        height: 34
-                        radius: 17
-                        color: studioBridge.compressionLevel === modelData.key
+                            Text {
+                                id: levelBtnText
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                font.family: Theme.sansFont
+                                font.pixelSize: 12
+                                font.bold: isLevelActive
+                                color: isLevelActive
+                                       ? Theme.surfaceCard
+                                       : Theme.textPrimary
+                            }
+
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: studioBridge.setCompressionLevel(modelData.key) }
+                        }
+                    }
+
+                    Rectangle {
+                        id: targetSizeModeBtn
+                        objectName: "compressTargetSizeModeBtn"
+                        width: Math.max(142, targetModeBtnText.implicitWidth + 20)
+                        height: 32
+                        radius: 16
+                        color: studioBridge.isTargetSizeMode
                                ? Theme.secondaryWine
                                : Theme.surfaceElevated
                         border.width: Theme.borderSubtleWidth
-                        border.color: studioBridge.compressionLevel === modelData.key
+                        border.color: studioBridge.isTargetSizeMode
                                       ? Theme.secondaryWine
                                       : Theme.borderSubtleColor
 
                         Text {
-                            id: levelBtnText
+                            id: targetModeBtnText
                             anchors.centerIn: parent
-                            text: modelData.label
+                            text: "Tamaño máximo (MB)"
                             font.family: Theme.sansFont
                             font.pixelSize: 12
-                            font.bold: studioBridge.compressionLevel === modelData.key
-                            color: studioBridge.compressionLevel === modelData.key
+                            font.bold: studioBridge.isTargetSizeMode
+                            color: studioBridge.isTargetSizeMode
                                    ? Theme.surfaceCard
                                    : Theme.textPrimary
                         }
 
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: studioBridge.setCompressionLevel(modelData.key) }
+                        TapHandler { onTapped: studioBridge.setTargetSizeMode(true) }
                     }
                 }
+
+                Item { Layout.fillWidth: true }
             }
 
-            Item { Layout.fillWidth: true }
+            RowLayout {
+                visible: studioBridge.isTargetSizeMode
+                Layout.fillWidth: true
+                spacing: 8
+
+                Text {
+                    text: "Límite:"
+                    font.family: Theme.sansFont
+                    font.pixelSize: 12
+                    font.bold: true
+                    color: Theme.textPrimary
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 74
+                    Layout.preferredHeight: 30
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: 8
+                    color: "#FFFFFF"
+                    border.width: Theme.borderSubtleWidth
+                    border.color: studioBridge.isTargetSizeValid
+                                  ? Theme.borderSubtleColor
+                                  : Theme.errorBorder
+
+                    TextInput {
+                        id: targetSizeField
+                        objectName: "targetSizeInput"
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        verticalAlignment: TextInput.AlignVCenter
+                        horizontalAlignment: TextInput.AlignHCenter
+                        selectByMouse: true
+                        text: studioBridge.targetSizeText
+                        font.family: Theme.sansFont
+                        font.pixelSize: 12
+                        font.bold: true
+                        color: Theme.textPrimary
+                        validator: RegularExpressionValidator {
+                            regularExpression: /^[0-9]{0,3}([.,][0-9]{0,2})?$/
+                        }
+                        onTextEdited: studioBridge.setTargetSizeText(text)
+
+                        Connections {
+                            target: studioBridge
+                            function onConfigChanged() {
+                                if (!targetSizeField.activeFocus && targetSizeField.text !== studioBridge.targetSizeText) {
+                                    targetSizeField.text = studioBridge.targetSizeText
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "MB"
+                    font.family: Theme.sansFont
+                    font.pixelSize: 12
+                    font.bold: true
+                    color: Theme.textSecondary
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                Row {
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+                    Repeater {
+                        model: studioBridge.targetSizePresets
+                        delegate: Rectangle {
+                            readonly property bool isPresetActive: studioBridge.isTargetSizeValid
+                                                                   && Math.abs(studioBridge.targetSizeMb - modelData) < 0.01
+                            objectName: "targetPresetBtn_" + modelData
+                            width: presetBtnText.implicitWidth + 16
+                            height: 26
+                            radius: 13
+                            color: isPresetActive ? Theme.primaryRose : "#FFFFFF"
+                            border.width: Theme.borderSubtleWidth
+                            border.color: isPresetActive ? Theme.secondaryWine : Theme.borderSubtleColor
+
+                            Text {
+                                id: presetBtnText
+                                anchors.centerIn: parent
+                                text: modelData + " MB"
+                                font.family: Theme.sansFont
+                                font.pixelSize: 11
+                                font.bold: isPresetActive
+                                color: isPresetActive ? Theme.surfaceCard : Theme.textPrimary
+                            }
+
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: studioBridge.setTargetSizeMb(modelData) }
+                        }
+                    }
+                }
+
+                Text {
+                    id: targetSizeNoticeText
+                    objectName: "targetSizeNoticeText"
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    text: studioBridge.targetWeightAnatomyNotice.length > 0
+                          ? studioBridge.targetWeightAnatomyNotice
+                          : studioBridge.targetSizeFeedback
+                    font.family: Theme.scriptFont
+                    font.italic: true
+                    font.pixelSize: 11
+                    color: !studioBridge.isTargetSizeValid
+                           ? Theme.errorText
+                           : (studioBridge.targetWeightAnatomyNotice.length > 0
+                              ? Theme.secondaryWine
+                              : Theme.textPrimary)
+                    opacity: studioBridge.isTargetSizeValid ? 0.85 : 1.0
+                    elide: Text.ElideRight
+                }
+            }
         }
 
         // 3. PDF_TO_IMAGES: Selector de formato PNG / JPG

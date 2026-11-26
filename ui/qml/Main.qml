@@ -42,6 +42,9 @@ Window {
         onActivated: {
             if (passwordPopup.opened) {
                 passwordPopup.close()
+            } else if (difficultCompressionPopup.opened) {
+                difficultCompressionPopup.close()
+                studioBridge.dismissDifficultTargetResult()
             } else if (completionPopup.opened) {
                 completionPopup.close()
             } else if (studioBridge.isBusy) {
@@ -55,7 +58,7 @@ Window {
     Shortcut {
         sequences: ["Ctrl+Return", "Ctrl+Enter"]
         onActivated: {
-            if (!passwordPopup.opened && !completionPopup.opened && studioBridge.validFileCount > 0) {
+            if (!passwordPopup.opened && !difficultCompressionPopup.opened && !completionPopup.opened && studioBridge.validFileCount > 0) {
                 studioBridge.triggerPrimaryAction()
             }
         }
@@ -85,6 +88,9 @@ Window {
             rootWindow.showSuccessModal = true
             completionPopup.open()
             waxSealStampAnim.restart()
+        }
+        function onDifficultCompressionOccurred(summary, advisory) {
+            difficultCompressionPopup.open()
         }
         function onErrorOccurred(errorMessage) {
             rootWindow.friendlyNoticeText = errorMessage
@@ -373,7 +379,7 @@ Window {
                 anchors.right: parent.right
                 anchors.bottom: bottomFooterBar.top
                 anchors.bottomMargin: visible ? 10 : 0
-                height: visible ? 72 : 0
+                height: visible ? bottomConfigPanel.implicitHeight : 0
             }
 
             // Lienzo principal de trabajo (sin cajas anidadas cuando hay archivos en la mesa)
@@ -621,10 +627,11 @@ Window {
     Popup {
         id: completionPopup
         objectName: "completionPopup"
+        readonly property bool hasCompressionPreview: studioBridge.lastCompressionPreviewUrl.length > 0
         parent: Overlay.overlay
         anchors.centerIn: Overlay.overlay
-        width: 520
-        height: 244
+        width: hasCompressionPreview ? 560 : 520
+        height: hasCompressionPreview ? 380 : 244
         modal: true
         focus: true
         padding: 0
@@ -710,6 +717,99 @@ Window {
                 }
             }
 
+            RowLayout {
+                visible: studioBridge.lastCompressionComparison.length > 0
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 10
+
+                Text {
+                    id: completionComparisonText
+                    objectName: "completionComparisonText"
+                    text: studioBridge.lastCompressionComparison
+                    font.family: Theme.serifFont
+                    font.pixelSize: 16
+                    font.bold: true
+                    color: Theme.secondaryWine
+                }
+
+                Rectangle {
+                    visible: studioBridge.lastCompressionQualityLabel.length > 0
+                    height: 24
+                    width: qualityBadgeLabel.implicitWidth + 18
+                    radius: 12
+                    color: "#F9E7DD"
+                    border.width: 1
+                    border.color: Theme.colorCompress
+
+                    Text {
+                        id: qualityBadgeLabel
+                        objectName: "completionQualityBadge"
+                        anchors.centerIn: parent
+                        text: studioBridge.lastCompressionQualityLabel
+                        font.family: Theme.sansFont
+                        font.pixelSize: 11
+                        font.bold: true
+                        color: "#6B361C"
+                    }
+                }
+            }
+
+            RowLayout {
+                visible: completionPopup.hasCompressionPreview
+                Layout.alignment: Qt.AlignHCenter
+                spacing: 14
+
+                Rectangle {
+                    Layout.preferredWidth: 74
+                    Layout.preferredHeight: 96
+                    radius: 6
+                    color: "#FFFFFF"
+                    border.width: 1
+                    border.color: Theme.borderSubtleColor
+                    clip: true
+
+                    Image {
+                        id: completionPreviewImage
+                        objectName: "completionPreviewImage"
+                        anchors.fill: parent
+                        anchors.margins: 3
+                        source: studioBridge.lastCompressionPreviewUrl
+                        sourceSize.width: 148
+                        sourceSize.height: 192
+                        fillMode: Image.PreserveAspectFit
+                        asynchronous: true
+                        cache: true
+                        smooth: true
+                    }
+                }
+
+                ColumnLayout {
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                        text: "Vista previa de la primera hoja"
+                        font.family: Theme.scriptFont
+                        font.italic: true
+                        font.pixelSize: 12
+                        color: Theme.textSecondary
+                    }
+
+                    PillButton {
+                        objectName: "modalOpenInViewerBtn"
+                        height: 32
+                        horizontalPadding: 14
+                        text: "Ver en Visor y Firma"
+                        primaryStyle: false
+                        solidShadow: false
+                        onClicked: {
+                            completionPopup.close()
+                            studioBridge.openResultInViewer()
+                        }
+                    }
+                }
+            }
+
             Text {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
@@ -754,6 +854,169 @@ Window {
                     primaryStyle: false
                     solidShadow: false
                     onClicked: completionPopup.close()
+                }
+            }
+        }
+    }
+
+    // Popup de Rescate para Casos Difíciles (límite MB inalcanzable sin destruir legibilidad)
+    Popup {
+        id: difficultCompressionPopup
+        objectName: "difficultCompressionPopup"
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: 590
+        height: studioBridge.difficultTargetAdvisory.length > 0 ? 372 : 336
+        modal: true
+        focus: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape
+
+        Overlay.modal: Rectangle {
+            color: "#881E0F16"
+        }
+
+        background: Rectangle {
+            radius: 16
+            color: Theme.surfaceLight
+            border.width: Theme.borderStrongWidth
+            border.color: Theme.secondaryWine
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 24
+            spacing: 12
+
+            Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                text: "No alcanzó el límite sin perder legibilidad"
+                font.family: Theme.serifFont
+                font.pixelSize: 18
+                font.bold: true
+                color: Theme.textPrimary
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 42
+                radius: 10
+                color: "#F9E7DD"
+                border.width: 1
+                border.color: Theme.colorCompress
+
+                Text {
+                    id: difficultSummaryLabel
+                    objectName: "difficultTargetSummaryText"
+                    anchors.centerIn: parent
+                    width: parent.width - 20
+                    horizontalAlignment: Text.AlignHCenter
+                    text: studioBridge.difficultTargetSummary
+                    font.family: Theme.sansFont
+                    font.pixelSize: 13
+                    font.bold: true
+                    color: "#6B361C"
+                    elide: Text.ElideRight
+                }
+            }
+
+            Text {
+                visible: studioBridge.difficultTargetAdvisory.length > 0
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                text: studioBridge.difficultTargetAdvisory
+                font.family: Theme.scriptFont
+                font.italic: true
+                font.pixelSize: 12
+                color: Theme.textSecondary
+                wrapMode: Text.WordWrap
+            }
+
+            Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                text: "Detuvimos la compresión en el piso legible para proteger tu lectura. Elige una alternativa:"
+                font.family: Theme.sansFont
+                font.pixelSize: 12
+                color: Theme.textMuted
+                wrapMode: Text.WordWrap
+            }
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: 10
+                rowSpacing: 10
+
+                PillButton {
+                    objectName: "rescueSaveBestBtn"
+                    Layout.fillWidth: true
+                    height: 38
+                    text: "Guardar mejor intento de todas formas"
+                    primaryStyle: true
+                    solidShadow: false
+                    onClicked: {
+                        difficultCompressionPopup.close()
+                        studioBridge.rescueSaveBestAttempt()
+                    }
+                }
+
+                PillButton {
+                    objectName: "rescueGrayscaleBtn"
+                    Layout.fillWidth: true
+                    height: 38
+                    text: "Convertir a blanco y negro"
+                    primaryStyle: false
+                    solidShadow: false
+                    onClicked: {
+                        difficultCompressionPopup.close()
+                        studioBridge.rescueConvertGrayscale()
+                    }
+                }
+
+                PillButton {
+                    objectName: "rescueRemoveBlanksBtn"
+                    Layout.fillWidth: true
+                    height: 38
+                    text: "Quitar páginas en blanco"
+                    primaryStyle: false
+                    solidShadow: false
+                    onClicked: {
+                        difficultCompressionPopup.close()
+                        studioBridge.rescueRemoveBlankPages()
+                    }
+                }
+
+                PillButton {
+                    objectName: "rescueSplitPartsBtn"
+                    Layout.fillWidth: true
+                    height: 38
+                    text: "Dividir en partes bajo el límite"
+                    primaryStyle: false
+                    solidShadow: false
+                    onClicked: {
+                        difficultCompressionPopup.close()
+                        studioBridge.rescueSplitIntoParts()
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+
+                Item { Layout.fillWidth: true }
+
+                PillButton {
+                    objectName: "rescueDismissBtn"
+                    height: 34
+                    text: "Cerrar"
+                    primaryStyle: false
+                    solidShadow: false
+                    onClicked: {
+                        studioBridge.dismissDifficultTargetResult()
+                        difficultCompressionPopup.close()
+                    }
                 }
             }
         }

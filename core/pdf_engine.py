@@ -17,7 +17,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPaint
 
 if TYPE_CHECKING:
     import pymupdf as fitz
-    from PIL import Image
+    from PIL import Image, ImageOps
     from pypdf import PdfReader, PdfWriter
     from pypdf.errors import PdfReadError, PdfStreamError
 
@@ -40,6 +40,7 @@ class _LazyModule:
 
 fitz: Any = _LazyModule("pymupdf", "fitz")
 Image: Any = _LazyModule("PIL.Image", "Image")
+ImageOps: Any = _LazyModule("PIL.ImageOps", "ImageOps")
 
 
 def _get_pypdf() -> tuple[Any, Any, Any, Any]:
@@ -75,7 +76,20 @@ from core.exceptions import (
     TaskCancelledError,
 )
 from core.models import (
+    BLANK_PAGE_MAX_INK_RATIO,
+    BLANK_PAGE_NON_WHITE_THRESHOLD,
+    BLANK_PAGE_RENDER_DPI,
     COMPRESSION_PROFILES,
+    DECIMAL_MB_BYTES,
+    SAMPLE_ESTIMATION_MAX_PAGES,
+    SAMPLE_ESTIMATION_MIN_PAGES,
+    SAMPLE_PIVOT_STEP_INDEX,
+    SINGLE_LARGE_IMAGE_RATIO_THRESHOLD,
+    TARGET_COMPRESSION_LADDER,
+    TARGET_SIZE_MAX_MB,
+    TARGET_SIZE_MIN_MB,
+    TARGET_SIZE_SAFETY_FACTOR,
+    TEXT_HEAVY_IMAGE_RATIO_THRESHOLD,
     CompressionLevel,
     CompressionProfile,
     ImageFormat,
@@ -83,9 +97,13 @@ from core.models import (
     PageItemInstruction,
     QueuedFile,
     SignatureOverlay,
+    TargetCompressionResult,
+    TargetCompressionStep,
+    TargetQualityLabel,
     ToolType,
     WatermarkConfig,
     WatermarkPosition,
+    WeightAnatomy,
 )
 from core.range_parser import parse_page_ranges
 
@@ -303,6 +321,25 @@ def _format_size_es(size_bytes: int) -> str:
         return f"{kb:.1f}".replace(".", ",") + " KB"
     mb = kb / 1024.0
     return f"{mb:.1f}".replace(".", ",") + " MB"
+
+
+def compute_target_bytes(target_mb: float) -> int:
+    """Valida el límite en MB y calcula el objetivo estricto (95% en base decimal 1 MB = 1,000,000 bytes)."""
+    if not math.isfinite(target_mb):
+        raise PDFStudioError("El tamaño objetivo en MB debe ser un número válido.")
+    if target_mb < TARGET_SIZE_MIN_MB or target_mb > TARGET_SIZE_MAX_MB:
+        raise PDFStudioError(
+            f"El tamaño objetivo debe estar entre {TARGET_SIZE_MIN_MB:.1f} MB y {TARGET_SIZE_MAX_MB:.0f} MB."
+        )
+    return max(1, int(target_mb * DECIMAL_MB_BYTES * TARGET_SIZE_SAFETY_FACTOR))
+
+
+def format_decimal_mb(size_bytes: int) -> str:
+    """Formatea bytes en MB decimales (1 MB = 1,000,000 bytes) con punto decimal."""
+    mb = max(0, int(size_bytes)) / float(DECIMAL_MB_BYTES)
+    if mb >= 1.0:
+        return f"{mb:.1f} MB"
+    return f"{mb:.2f} MB"
 
 
 class PDFEngine:
@@ -1200,6 +1237,954 @@ class PDFEngine:
                 f"(-{saved_pct:.0f}%){sig_notice}"
             ),
         )
+
+    @staticmethod
+    def _capture_pdf_integrity_meta(doc: fitz.Document) -> dict[str, object]:
+        """Captura metadatos estructurales básicos para validar integridad tras recomprimir."""
+        total_pages = doc.page_count
+        sample_check_indices = sorted({0, total_pages // 2, max(0, total_pages - 1)})
+        text_pages = [
+            p_idx
+            for p_idx in sample_check_indices
+            if len(doc.load_page(p_idx).get_text("text").strip()) > 0
+        ]
+        smask_pages = [
+            p_idx
+            for p_idx in sample_check_indices
+            if any(int(item[1]) > 0 for item in doc.get_page_images(p_idx))
+        ]
+        return {
+            "page_count": total_pages,
+            "toc_count": len(doc.get_toc()),
+            "text_pages": text_pages,
+            "smask_pages": smask_pages,
+        }
+
+    @staticmethod
+    def analyze_pdf_weight_anatomy(
+        file_path: Path,
+        password: str | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> WeightAnatomy:
+        """Inspecciona XREFs únicos de imágenes para medir peso de imágenes frente a texto/vectores."""
+        path = Path(file_path)
+        info = inspect_pdf_file(path, password=password)
+        if info.is_encrypted and not password:
+            raise PDFEncryptedError(
+                f"El archivo '{path.name}' está protegido con contraseña."
+            )
+
+        orig_bytes = info.original_size_bytes
+        doc = fitz.open(path)
+        try:
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            _check_cancel(is_cancelled)
+            xref_map = PDFEngine._collect_document_image_xrefs(
+                doc, is_cancelled=is_cancelled
+            )
+            page_image_bytes: dict[int, int] = {}
+            for p_idx in range(doc.page_count):
+                _check_cancel(is_cancelled)
+                seen_on_page: set[int] = set()
+                p_sum = 0
+                for item in doc.get_page_images(p_idx):
+                    xr = int(item[0])
+                    if xr in xref_map and xr not in seen_on_page:
+                        seen_on_page.add(xr)
+                        p_sum += int(xref_map[xr]["raw_len"])
+                page_image_bytes[p_idx] = p_sum
+
+            image_bytes = sum(int(m["raw_len"]) for m in xref_map.values())
+            non_image_bytes = max(0, orig_bytes - image_bytes)
+            image_ratio = (
+                min(1.0, image_bytes / float(orig_bytes)) if orig_bytes > 0 else 0.0
+            )
+            is_text_heavy = image_ratio < TEXT_HEAVY_IMAGE_RATIO_THRESHOLD
+            is_single_large_image = (
+                doc.page_count == 1
+                and len(xref_map) == 1
+                and image_ratio >= SINGLE_LARGE_IMAGE_RATIO_THRESHOLD
+            )
+            if is_text_heavy:
+                advisory = (
+                    "Este PDF es principalmente texto/vectores (menos del 15% en imágenes): "
+                    "el ahorro de peso será limitado."
+                )
+            elif is_single_large_image:
+                advisory = (
+                    "PDF de una sola imagen de alta resolución: se priorizará reducción directa de DPI."
+                )
+            else:
+                advisory = ""
+
+            return WeightAnatomy(
+                original_bytes=orig_bytes,
+                image_bytes=image_bytes,
+                non_image_bytes=non_image_bytes,
+                image_ratio=round(image_ratio, 4),
+                unique_image_count=len(xref_map),
+                page_count=doc.page_count,
+                is_text_heavy=is_text_heavy,
+                is_single_large_image=is_single_large_image,
+                page_image_bytes=page_image_bytes,
+                advisory_message=advisory,
+            )
+        finally:
+            doc.close()
+
+    @staticmethod
+    def _select_sample_pages(
+        anatomy: WeightAnatomy,
+        max_pages: int = SAMPLE_ESTIMATION_MAX_PAGES,
+    ) -> list[int]:
+        """Selecciona hasta 5 páginas representativas priorizando la primera y las más pesadas en imágenes."""
+        if anatomy.page_count <= 0:
+            return []
+        if anatomy.page_count <= max_pages:
+            return list(range(anatomy.page_count))
+        candidates = sorted(
+            range(1, anatomy.page_count),
+            key=lambda p: anatomy.page_image_bytes.get(p, 0),
+            reverse=True,
+        )
+        selected = [0, *candidates[: max(0, max_pages - 1)]]
+        return sorted(selected)
+
+    @staticmethod
+    def _encode_image_for_target_step(
+        qimg: QImage,
+        meta: dict[str, object],
+        step: TargetCompressionStep,
+        grayscale: bool = False,
+    ) -> tuple[bytes | None, int, int]:
+        """Escala y codifica una imagen para un escalón dado; opcionalmente convierte a escala de grises."""
+        orig_w = qimg.width()
+        orig_h = qimg.height()
+        raw_len = int(meta["raw_len"])
+        bpc = int(meta["bpc"])
+        max_eff_dpi = float(meta["max_eff_dpi"])
+
+        if bpc == 1 and not grayscale and (step.index < 4 or max_eff_dpi <= 250.0):
+            return None, orig_w, orig_h
+
+        target_w, target_h = orig_w, orig_h
+        if max_eff_dpi > step.dpi_threshold and max_eff_dpi > 1.0:
+            ratio = step.dpi_target / max_eff_dpi
+            if ratio < 0.98:
+                target_w = max(16, int(round(orig_w * ratio)))
+                target_h = max(16, int(round(orig_h * ratio)))
+
+        max_dim = max(target_w, target_h)
+        if max_dim > step.max_side_px:
+            cap_ratio = step.max_side_px / float(max_dim)
+            target_w = max(16, int(round(target_w * cap_ratio)))
+            target_h = max(16, int(round(target_h * cap_ratio)))
+
+        if not grayscale:
+            work_img = (
+                qimg.scaled(
+                    target_w,
+                    target_h,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                if (target_w != orig_w or target_h != orig_h)
+                else qimg
+            )
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            if not work_img.save(buf, "JPG", step.jpeg_quality):
+                return None, orig_w, orig_h
+            jpg_bytes = bytes(buf.data())
+            if len(jpg_bytes) < raw_len - 64:
+                return jpg_bytes, work_img.width(), work_img.height()
+            return None, orig_w, orig_h
+
+        rgb_img = qimg.convertToFormat(QImage.Format.Format_RGB888)
+        pil_img = None
+        gray_img = None
+        enhanced_img = None
+        resized_img = None
+        try:
+            pil_img = Image.frombytes(
+                "RGB",
+                (rgb_img.width(), rgb_img.height()),
+                bytes(rgb_img.constBits()),
+                "raw",
+                "RGB",
+                rgb_img.bytesPerLine(),
+                1,
+            )
+            gray_img = ImageOps.grayscale(pil_img)
+            enhanced_img = ImageOps.autocontrast(gray_img, cutoff=1)
+            if target_w != orig_w or target_h != orig_h:
+                resized_img = enhanced_img.resize(
+                    (target_w, target_h), Image.Resampling.LANCZOS
+                )
+            else:
+                resized_img = enhanced_img
+
+            out_buf = io.BytesIO()
+            resized_img.save(
+                out_buf,
+                format="JPEG",
+                quality=step.jpeg_quality,
+                optimize=True,
+            )
+            jpg_bytes = out_buf.getvalue()
+            if len(jpg_bytes) < raw_len - 64:
+                return jpg_bytes, target_w, target_h
+            return None, orig_w, orig_h
+        finally:
+            if resized_img is not None and resized_img is not enhanced_img:
+                resized_img.close()
+            if enhanced_img is not None:
+                enhanced_img.close()
+            if gray_img is not None:
+                gray_img.close()
+            if pil_img is not None:
+                pil_img.close()
+
+    @staticmethod
+    def _estimate_starting_step(
+        doc: fitz.Document,
+        xref_map: dict[int, dict[str, object]],
+        anatomy: WeightAnatomy,
+        target_bytes: int,
+        grayscale: bool = False,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> int:
+        """Estima el escalón inicial usando anatomía o una muestra de hasta 5 páginas en RAM."""
+        if anatomy.is_text_heavy and not grayscale:
+            return 0
+        if anatomy.is_single_large_image:
+            return 3 if target_bytes < int(anatomy.original_bytes * 0.35) else 2
+        if anatomy.page_count < SAMPLE_ESTIMATION_MIN_PAGES:
+            return 3 if target_bytes < int(anatomy.original_bytes * 0.40) else 2
+
+        sample_pages = PDFEngine._select_sample_pages(
+            anatomy, max_pages=SAMPLE_ESTIMATION_MAX_PAGES
+        )
+        sample_xrefs: list[int] = []
+        seen: set[int] = set()
+        for p_idx in sample_pages:
+            _check_cancel(is_cancelled)
+            for item in doc.get_page_images(p_idx):
+                xr = int(item[0])
+                if xr in xref_map and xr not in seen:
+                    seen.add(xr)
+                    sample_xrefs.append(xr)
+
+        sample_orig_raw = sum(int(xref_map[xr]["raw_len"]) for xr in sample_xrefs)
+        if sample_orig_raw <= 0 or anatomy.image_bytes <= 0:
+            return 0
+
+        pivot_step = TARGET_COMPRESSION_LADDER[SAMPLE_PIVOT_STEP_INDEX]
+        sample_new_bytes = 0
+        for xr in sample_xrefs:
+            _check_cancel(is_cancelled)
+            meta = xref_map[xr]
+            qimg = PDFEngine._decode_xref_to_qimage(doc, meta)
+            if qimg is None:
+                sample_new_bytes += int(meta["raw_len"])
+                continue
+            try:
+                jpg_bytes, _, _ = PDFEngine._encode_image_for_target_step(
+                    qimg, meta, pivot_step, grayscale=grayscale
+                )
+            finally:
+                qimg = None
+            sample_new_bytes += (
+                len(jpg_bytes) if jpg_bytes is not None else int(meta["raw_len"])
+            )
+
+        ratio = sample_new_bytes / float(sample_orig_raw)
+        extrapolated_img = int(round(anatomy.image_bytes * ratio))
+        extrapolated_total = int(anatomy.non_image_bytes * 0.90) + extrapolated_img
+
+        if extrapolated_total <= int(target_bytes * 0.55):
+            return 1
+        if extrapolated_total <= int(target_bytes * 0.85):
+            return 2
+        if extrapolated_total <= int(target_bytes * 1.15):
+            return 3
+        if extrapolated_total <= int(target_bytes * 1.65):
+            return 4
+        return 5
+
+    @staticmethod
+    def _compress_step_to_bytes(
+        source: Path | bytes,
+        step: TargetCompressionStep,
+        password: str | None = None,
+        grayscale: bool = False,
+        xref_map: dict[int, dict[str, object]] | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> bytes:
+        """Ejecuta un escalón completo en RAM mediante doc.tobytes() sin archivos temporales en disco."""
+        doc = (
+            fitz.open(source)
+            if isinstance(source, (Path, str))
+            else fitz.open("pdf", source)
+        )
+        try:
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            _check_cancel(is_cancelled)
+
+            if not step.structural_only:
+                active_xrefs = (
+                    xref_map
+                    if xref_map is not None
+                    else PDFEngine._collect_document_image_xrefs(
+                        doc, is_cancelled=is_cancelled
+                    )
+                )
+                for xref, meta in active_xrefs.items():
+                    _check_cancel(is_cancelled)
+                    qimg = PDFEngine._decode_xref_to_qimage(doc, meta)
+                    if qimg is None:
+                        continue
+                    try:
+                        jpg_bytes, new_w, new_h = (
+                            PDFEngine._encode_image_for_target_step(
+                                qimg, meta, step, grayscale=grayscale
+                            )
+                        )
+                    finally:
+                        qimg = None
+                    if jpg_bytes is None:
+                        continue
+
+                    first_page_idx = int(meta["first_page"])
+                    smask_xref = int(meta["smask"])
+                    doc.load_page(first_page_idx).replace_image(
+                        xref, stream=jpg_bytes
+                    )
+                    if smask_xref > 0:
+                        PDFEngine._scale_smask_if_needed(
+                            doc, smask_xref, new_w, new_h
+                        )
+                        try:
+                            doc.xref_set_key(xref, "SMask", f"{smask_xref} 0 R")
+                        except Exception:
+                            pass
+
+            _check_cancel(is_cancelled)
+            if step.strip_metadata:
+                try:
+                    doc.set_metadata({})
+                except Exception:
+                    pass
+            if step.strip_xml_metadata:
+                try:
+                    doc.del_xml_metadata()
+                except Exception:
+                    pass
+
+            return bytes(
+                doc.tobytes(
+                    garbage=step.garbage,
+                    deflate=True,
+                    clean=True,
+                    deflate_images=True,
+                    deflate_fonts=True,
+                    use_objstms=step.use_objstms,
+                )
+            )
+        finally:
+            doc.close()
+
+    @staticmethod
+    def _write_pdf_bytes_atomically(
+        pdf_bytes: bytes,
+        destination: Path,
+        orig_meta: dict[str, object] | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> Path:
+        """Escribe bytes PDF al destino de forma atómica y valida integridad opcionalmente."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=".tmp_target_", suffix=".pdf", dir=str(destination.parent)
+            )
+            os.close(fd)
+        except OSError as exc:
+            raise PDFStudioError(
+                f"No se pudo crear archivo temporal en '{destination.parent}': verifica permisos y espacio en disco."
+            ) from exc
+
+        tmp_path = Path(tmp_name)
+        try:
+            _check_cancel(is_cancelled)
+            tmp_path.write_bytes(pdf_bytes)
+            _check_cancel(is_cancelled)
+            if orig_meta is not None:
+                PDFEngine._verify_compressed_pdf_integrity(tmp_path, orig_meta)
+            _check_cancel(is_cancelled)
+            try:
+                shutil.move(str(tmp_path), str(destination))
+            except PermissionError as exc:
+                raise PDFStudioError(
+                    f"El archivo de destino '{destination.name}' está bloqueado por otro programa."
+                ) from exc
+            except OSError as exc:
+                raise PDFStudioError(
+                    f"No se pudo guardar '{destination.name}': espacio insuficiente en disco o error de escritura."
+                ) from exc
+            return destination
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def compress_pdf_to_target_size(
+        input_file: Path,
+        output_path: Path,
+        target_mb: float,
+        password: str | None = None,
+        grayscale: bool = False,
+        on_progress: ProgressCallback | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> TargetCompressionResult:
+        """Comprime un PDF al límite objetivo (95% decimal) con muestra + búsqueda binaria en RAM."""
+        target_bytes = compute_target_bytes(target_mb)
+        path = Path(input_file)
+        info = inspect_pdf_file(path, password=password)
+        if info.is_encrypted and not password:
+            raise PDFEncryptedError(
+                f"El archivo '{path.name}' está protegido con contraseña."
+            )
+
+        original_bytes = info.original_size_bytes
+        _emit_progress(on_progress, 5, "Analizando peso y anatomía del documento...")
+        _check_cancel(is_cancelled)
+
+        anatomy = PDFEngine.analyze_pdf_weight_anatomy(
+            path, password=password, is_cancelled=is_cancelled
+        )
+
+        # Si el archivo ya cumple el 95% del límite (y no estamos en rescate B/N), avisar sin duplicar
+        if original_bytes <= target_bytes and not grayscale:
+            _emit_progress(
+                on_progress,
+                100,
+                f"El documento ya cumple el límite ({format_decimal_mb(original_bytes)}).",
+            )
+            return TargetCompressionResult(
+                met_target=True,
+                already_within_limit=True,
+                target_mb=target_mb,
+                target_bytes=target_bytes,
+                original_size_bytes=original_bytes,
+                best_size_bytes=original_bytes,
+                best_step_index=0,
+                quality_label=TargetQualityLabel.VERY_GOOD.value,
+                passes_executed=0,
+                anatomy=anatomy,
+                message=(
+                    f"El archivo ya pesa {format_decimal_mb(original_bytes)} y cumple el límite "
+                    f"({format_decimal_mb(target_bytes)}). No se creó copia innecesaria."
+                ),
+                comparison_text=f"{format_decimal_mb(original_bytes)} → {format_decimal_mb(original_bytes)}",
+                best_pdf_bytes=None,
+                operation_result=None,
+                grayscale_applied=False,
+            )
+
+        has_sig = PDFEngine.has_digital_signature(path, password=password)
+        doc = fitz.open(path)
+        try:
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            orig_meta = PDFEngine._capture_pdf_integrity_meta(doc)
+            xref_map = PDFEngine._collect_document_image_xrefs(
+                doc, is_cancelled=is_cancelled
+            )
+            _emit_progress(
+                on_progress,
+                15,
+                "Estimando escalón óptimo mediante muestra representativa...",
+            )
+            start_idx = PDFEngine._estimate_starting_step(
+                doc,
+                xref_map,
+                anatomy,
+                target_bytes,
+                grayscale=grayscale,
+                is_cancelled=is_cancelled,
+            )
+        finally:
+            doc.close()
+
+        max_passes = 3
+        low = 0
+        high = len(TARGET_COMPRESSION_LADDER) - 1
+        probe = start_idx
+        tried: dict[int, bytes] = {}
+        best_passing_idx: int | None = None
+        best_overall_idx = start_idx
+        best_overall_bytes: bytes | None = None
+        passes = 0
+
+        while passes < max_passes and low <= high:
+            if probe in tried:
+                break
+            _check_cancel(is_cancelled)
+            step = TARGET_COMPRESSION_LADDER[probe]
+            passes += 1
+            pct = 20 + int((passes / max_passes) * 65)
+            _emit_progress(
+                on_progress,
+                pct,
+                f"Pasada {passes}/{max_passes} — Nivel '{step.quality_label.value}' (escalón {probe + 1}/6)...",
+            )
+            candidate_bytes = PDFEngine._compress_step_to_bytes(
+                path,
+                step,
+                password=password,
+                grayscale=grayscale,
+                xref_map=xref_map,
+                is_cancelled=is_cancelled,
+            )
+            tried[probe] = candidate_bytes
+
+            if best_overall_bytes is None or len(candidate_bytes) < len(
+                best_overall_bytes
+            ):
+                best_overall_bytes = candidate_bytes
+                best_overall_idx = probe
+
+            if len(candidate_bytes) <= target_bytes:
+                if best_passing_idx is None or probe < best_passing_idx:
+                    best_passing_idx = probe
+                high = probe - 1
+            else:
+                low = probe + 1
+
+            if low > high:
+                break
+
+            # Garantizar evaluar el piso mínimo legible (5) en el último intento si nada cumplió aún
+            if (
+                passes == max_passes - 1
+                and best_passing_idx is None
+                and 5 not in tried
+                and low <= 5 <= high
+            ):
+                probe = 5
+            else:
+                probe = (low + high) // 2
+
+        if best_passing_idx is not None:
+            winning_bytes = tried[best_passing_idx]
+            winning_step = TARGET_COMPRESSION_LADDER[best_passing_idx]
+            tried.clear()
+
+            safe_dest = ensure_safe_output_path(
+                path, output_path, default_suffix="_comprimido"
+            )
+            _emit_progress(on_progress, 92, "Guardando PDF optimizado en disco...")
+            PDFEngine._write_pdf_bytes_atomically(
+                winning_bytes,
+                safe_dest,
+                orig_meta=orig_meta,
+                is_cancelled=is_cancelled,
+            )
+            final_bytes = safe_dest.stat().st_size
+            saved_pct = (
+                max(0.0, ((original_bytes - final_bytes) / original_bytes) * 100.0)
+                if original_bytes > 0
+                else 0.0
+            )
+            comparison = (
+                f"{format_decimal_mb(original_bytes)} → {format_decimal_mb(final_bytes)}"
+            )
+            sig_notice = (
+                " (Nota: la firma digital previa quedó invalidada)"
+                if has_sig
+                else ""
+            )
+            op_res = OperationResult(
+                tool=ToolType.COMPRESS,
+                output_files=[safe_dest],
+                original_size_bytes=original_bytes,
+                final_size_bytes=final_bytes,
+                saved_percentage=round(saved_pct, 2),
+                message=(
+                    f"{comparison} · Calidad {winning_step.quality_label.value}"
+                    f"{sig_notice}"
+                ),
+            )
+            _emit_progress(on_progress, 100, "Compresión a tamaño objetivo completada.")
+            return TargetCompressionResult(
+                met_target=True,
+                already_within_limit=False,
+                target_mb=target_mb,
+                target_bytes=target_bytes,
+                original_size_bytes=original_bytes,
+                best_size_bytes=final_bytes,
+                best_step_index=best_passing_idx,
+                quality_label=winning_step.quality_label.value,
+                passes_executed=passes,
+                anatomy=anatomy,
+                message=op_res.message,
+                comparison_text=comparison,
+                best_pdf_bytes=None,
+                operation_result=op_res,
+                grayscale_applied=grayscale,
+            )
+
+        assert best_overall_bytes is not None
+        best_size = len(best_overall_bytes)
+        tried.clear()
+        missing_bytes = max(1, best_size - target_bytes)
+        best_step = TARGET_COMPRESSION_LADDER[best_overall_idx]
+        msg = (
+            f"Mejor intento: {format_decimal_mb(best_size)} — "
+            f"faltan {format_decimal_mb(missing_bytes)} para el límite"
+        )
+        _emit_progress(
+            on_progress,
+            100,
+            "Se alcanzó el piso de legibilidad sin llegar al límite.",
+        )
+        return TargetCompressionResult(
+            met_target=False,
+            already_within_limit=False,
+            target_mb=target_mb,
+            target_bytes=target_bytes,
+            original_size_bytes=original_bytes,
+            best_size_bytes=best_size,
+            best_step_index=best_overall_idx,
+            quality_label=best_step.quality_label.value,
+            passes_executed=passes,
+            anatomy=anatomy,
+            message=msg,
+            comparison_text=f"{format_decimal_mb(original_bytes)} → {format_decimal_mb(best_size)}",
+            best_pdf_bytes=best_overall_bytes,
+            operation_result=None,
+            grayscale_applied=grayscale,
+        )
+
+    @staticmethod
+    def save_pdf_bytes_safely(
+        pdf_bytes: bytes,
+        input_file: Path,
+        output_path: Path,
+        original_size_bytes: int,
+        quality_label: str = "",
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> OperationResult:
+        """Guarda en disco un intento previo en RAM sin sobrescribir el original."""
+        if not pdf_bytes:
+            raise PDFStudioError("No hay contenido PDF generado para guardar.")
+        path = Path(input_file)
+        safe_dest = ensure_safe_output_path(
+            path, output_path, default_suffix="_comprimido"
+        )
+        PDFEngine._write_pdf_bytes_atomically(
+            pdf_bytes, safe_dest, orig_meta=None, is_cancelled=is_cancelled
+        )
+        final_bytes = safe_dest.stat().st_size
+        saved_pct = (
+            max(0.0, ((original_size_bytes - final_bytes) / original_size_bytes) * 100.0)
+            if original_size_bytes > 0
+            else 0.0
+        )
+        comparison = (
+            f"{format_decimal_mb(original_size_bytes)} → {format_decimal_mb(final_bytes)}"
+        )
+        q_suffix = f" · Calidad {quality_label}" if quality_label else ""
+        return OperationResult(
+            tool=ToolType.COMPRESS,
+            output_files=[safe_dest],
+            original_size_bytes=original_size_bytes,
+            final_size_bytes=final_bytes,
+            saved_percentage=round(saved_pct, 2),
+            message=f"{comparison}{q_suffix}",
+        )
+
+    @staticmethod
+    def compress_pdf_grayscale_rescue(
+        input_file: Path,
+        output_path: Path,
+        target_mb: float,
+        password: str | None = None,
+        on_progress: ProgressCallback | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> TargetCompressionResult:
+        """Re-procesa imágenes a escala de grises y alto contraste (Pillow) y re-evalúa contra el límite."""
+        return PDFEngine.compress_pdf_to_target_size(
+            input_file=input_file,
+            output_path=output_path,
+            target_mb=target_mb,
+            password=password,
+            grayscale=True,
+            on_progress=on_progress,
+            is_cancelled=is_cancelled,
+        )
+
+    @staticmethod
+    def detect_blank_pages(
+        file_path: Path,
+        password: str | None = None,
+        dpi: int = BLANK_PAGE_RENDER_DPI,
+        non_white_threshold: int = BLANK_PAGE_NON_WHITE_THRESHOLD,
+        max_ink_ratio: float = BLANK_PAGE_MAX_INK_RATIO,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> list[int]:
+        """Detecta páginas vacías renderizando a 36 DPI y midiendo densidad de píxeles no blancos."""
+        path = Path(file_path)
+        info = inspect_pdf_file(path, password=password)
+        if info.is_encrypted and not password:
+            raise PDFEncryptedError(
+                f"El archivo '{path.name}' está protegido con contraseña."
+            )
+
+        zoom = max(0.25, dpi / 72.0)
+        matrix = fitz.Matrix(zoom, zoom)
+        blank_indices: list[int] = []
+        doc = fitz.open(path)
+        try:
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            for p_idx in range(doc.page_count):
+                _check_cancel(is_cancelled)
+                page = None
+                pix = None
+                gray_pix = None
+                pil_img = None
+                try:
+                    page = doc.load_page(p_idx)
+                    pix = page.get_pixmap(matrix=matrix, alpha=False)
+                    gray_pix = (
+                        pix if pix.n == 1 else fitz.Pixmap(fitz.csGRAY, pix)
+                    )
+                    pil_img = Image.frombytes(
+                        "L",
+                        (gray_pix.width, gray_pix.height),
+                        bytes(gray_pix.samples),
+                    )
+                    hist = pil_img.histogram()
+                    total_px = max(1, gray_pix.width * gray_pix.height)
+                    non_white_px = sum(hist[:non_white_threshold])
+                    if (non_white_px / float(total_px)) <= max_ink_ratio:
+                        blank_indices.append(p_idx)
+                finally:
+                    if pil_img is not None:
+                        pil_img.close()
+                    del gray_pix
+                    del pix
+                    del page
+            return blank_indices
+        finally:
+            doc.close()
+
+    @staticmethod
+    def remove_blank_pages_and_compress(
+        input_file: Path,
+        output_path: Path,
+        target_mb: float,
+        password: str | None = None,
+        on_progress: ProgressCallback | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> TargetCompressionResult:
+        """Descarta páginas en blanco detectadas a 36 DPI y recalcula compresión al límite objetivo."""
+        path = Path(input_file)
+        _emit_progress(on_progress, 10, "Buscando páginas en blanco a 36 DPI...")
+        blank_indices = PDFEngine.detect_blank_pages(
+            path, password=password, is_cancelled=is_cancelled
+        )
+        if not blank_indices:
+            raise PDFStudioError(
+                "No se detectaron páginas en blanco en este documento."
+            )
+
+        doc = fitz.open(path)
+        try:
+            if doc.needs_pass and password:
+                doc.authenticate(password)
+            total_pages = doc.page_count
+            if len(blank_indices) >= total_pages:
+                raise PDFStudioError(
+                    "Todas las páginas del documento están en blanco; no se generó un PDF vacío."
+                )
+            keep_indices = [
+                idx for idx in range(total_pages) if idx not in set(blank_indices)
+            ]
+
+            with tempfile.TemporaryDirectory(prefix="coquette_noblanks_") as tmp_dir:
+                cleaned_pdf = Path(tmp_dir) / f"{path.stem}_sin_blancos.pdf"
+                cleaned_doc = fitz.open()
+                try:
+                    for k_idx in keep_indices:
+                        _check_cancel(is_cancelled)
+                        cleaned_doc.insert_pdf(doc, from_page=k_idx, to_page=k_idx)
+                    cleaned_doc.save(str(cleaned_pdf), deflate=True)
+                finally:
+                    cleaned_doc.close()
+
+                res = PDFEngine.compress_pdf_to_target_size(
+                    input_file=cleaned_pdf,
+                    output_path=output_path,
+                    target_mb=target_mb,
+                    password=None,
+                    on_progress=on_progress,
+                    is_cancelled=is_cancelled,
+                )
+                res.removed_blank_pages = len(blank_indices)
+                # Conservar el peso original real del archivo fuente para la comparativa
+                res.original_size_bytes = path.stat().st_size
+                res.comparison_text = (
+                    f"{format_decimal_mb(res.original_size_bytes)} → "
+                    f"{format_decimal_mb(res.best_size_bytes)}"
+                )
+                if res.operation_result is not None:
+                    orig_b = res.original_size_bytes
+                    final_b = res.operation_result.final_size_bytes
+                    res.operation_result.original_size_bytes = orig_b
+                    res.operation_result.saved_percentage = round(
+                        max(0.0, ((orig_b - final_b) / orig_b) * 100.0)
+                        if orig_b > 0
+                        else 0.0,
+                        2,
+                    )
+                    res.operation_result.message = (
+                        f"{res.comparison_text} · Calidad {res.quality_label} "
+                        f"({len(blank_indices)} pág. en blanco quitadas)"
+                    )
+                    res.message = res.operation_result.message
+                return res
+        finally:
+            doc.close()
+
+    @staticmethod
+    def split_pdf_to_target_size(
+        input_file: Path,
+        output_path: Path,
+        target_mb: float,
+        password: str | None = None,
+        source_pdf_bytes: bytes | None = None,
+        on_progress: ProgressCallback | None = None,
+        is_cancelled: CancelCheckCallback | None = None,
+    ) -> OperationResult:
+        """Divide un PDF en volúmenes consecutivos (_parte1.pdf, _parte2.pdf...) bajo target_bytes."""
+        target_bytes = compute_target_bytes(target_mb)
+        path = Path(input_file)
+        info = inspect_pdf_file(path, password=password)
+        if info.is_encrypted and not password:
+            raise PDFEncryptedError(
+                f"El archivo '{path.name}' está protegido con contraseña."
+            )
+
+        base_dest = ensure_safe_output_path(
+            path, output_path, default_suffix="_parte"
+        )
+        base_stem = base_dest.stem
+        if base_stem.endswith("_parte"):
+            base_stem = base_stem[: -len("_parte")] or path.stem
+
+        src_doc = (
+            fitz.open("pdf", source_pdf_bytes)
+            if source_pdf_bytes is not None
+            else fitz.open(path)
+        )
+        created_files: list[Path] = []
+        oversized_single_pages: list[int] = []
+
+        def _build_slice_bytes(start_idx: int, end_idx: int) -> bytes:
+            part_doc = fitz.open()
+            try:
+                part_doc.insert_pdf(src_doc, from_page=start_idx, to_page=end_idx)
+                return bytes(
+                    part_doc.tobytes(garbage=4, deflate=True, use_objstms=1)
+                )
+            finally:
+                part_doc.close()
+
+        try:
+            if source_pdf_bytes is None and src_doc.needs_pass and password:
+                src_doc.authenticate(password)
+
+            total_pages = src_doc.page_count
+            if total_pages < 1:
+                raise PDFCorruptedError(f"El PDF '{path.name}' no tiene páginas.")
+
+            start_idx = 0
+            part_num = 1
+            while start_idx < total_pages:
+                _check_cancel(is_cancelled)
+                # Probar el tramo restante completo primero para evitar búsquedas si ya cabe
+                full_rem_bytes = _build_slice_bytes(start_idx, total_pages - 1)
+                if len(full_rem_bytes) <= target_bytes:
+                    chosen_end = total_pages - 1
+                    chosen_bytes = full_rem_bytes
+                else:
+                    # Búsqueda binaria del mayor end_idx en [start_idx, total_pages - 2] que quepa
+                    low = start_idx
+                    high = total_pages - 2
+                    chosen_end = start_idx
+                    chosen_bytes = _build_slice_bytes(start_idx, start_idx)
+                    if len(chosen_bytes) > target_bytes:
+                        oversized_single_pages.append(start_idx + 1)
+                    else:
+                        low = start_idx + 1
+                        while low <= high:
+                            _check_cancel(is_cancelled)
+                            mid = (low + high) // 2
+                            cand_bytes = _build_slice_bytes(start_idx, mid)
+                            if len(cand_bytes) <= target_bytes:
+                                chosen_end = mid
+                                chosen_bytes = cand_bytes
+                                low = mid + 1
+                            else:
+                                high = mid - 1
+
+                part_dest = ensure_safe_output_path(
+                    path,
+                    base_dest.with_name(f"{base_stem}_parte{part_num}.pdf"),
+                    default_suffix=f"_parte{part_num}",
+                )
+                PDFEngine._write_pdf_bytes_atomically(
+                    chosen_bytes, part_dest, orig_meta=None, is_cancelled=is_cancelled
+                )
+                created_files.append(part_dest)
+
+                pct = int(((chosen_end + 1) / total_pages) * 95)
+                _emit_progress(
+                    on_progress,
+                    pct,
+                    f"Creada parte {part_num} (págs. {start_idx + 1}-{chosen_end + 1})...",
+                )
+                start_idx = chosen_end + 1
+                part_num += 1
+
+            _emit_progress(on_progress, 100, "División en partes completada.")
+            final_total = sum(f.stat().st_size for f in created_files if f.exists())
+            warn_note = (
+                f" (Nota: pág. {', '.join(map(str, oversized_single_pages))} excede por sí sola el límite)"
+                if oversized_single_pages
+                else ""
+            )
+            return OperationResult(
+                tool=ToolType.COMPRESS,
+                output_files=created_files,
+                original_size_bytes=info.original_size_bytes,
+                final_size_bytes=final_total,
+                saved_percentage=0.0,
+                message=(
+                    f"Se dividió en {len(created_files)} parte(s) bajo "
+                    f"{format_decimal_mb(target_bytes)}{warn_note}."
+                ),
+            )
+        except Exception:
+            for partial in created_files:
+                partial.unlink(missing_ok=True)
+            raise
+        finally:
+            src_doc.close()
 
     @staticmethod
     def protect_pdf(

@@ -38,7 +38,12 @@ from core.filename_utils import (
 )
 from core.history import OperationHistoryStore
 from core.models import (
+    DECIMAL_MB_BYTES,
     STROKE_WIDTH_PT_MAP,
+    TARGET_SIZE_MAX_MB,
+    TARGET_SIZE_MIN_MB,
+    TARGET_SIZE_PRESETS_MB,
+    TARGET_SIZE_SAFETY_FACTOR,
     CompressionLevel,
     ImageFormat,
     OperationResult,
@@ -46,6 +51,7 @@ from core.models import (
     QueuedFile,
     SignatureOverlay,
     StrokeWidthPreset,
+    TargetCompressionResult,
     ToolType,
     WatermarkConfig,
     WatermarkPosition,
@@ -180,6 +186,7 @@ class StudioBridge(QObject):
 
     passwordRequired = Signal(str, str)  # file_path, file_name
     operationCompleted = Signal(str, str, str)  # message, first_file_path, folder_path
+    difficultCompressionOccurred = Signal(str, str)  # summary, advisory
     errorOccurred = Signal(str)
 
     def __init__(
@@ -233,9 +240,17 @@ class StudioBridge(QObject):
         self._split_selected_indices: set[int] = set()
         self._split_separate: bool = False
         self._compression_level: str = CompressionLevel.RECOMMENDED.value
+        self._is_target_size_mode: bool = False
+        self._target_size_mb: float = 5.0
+        self._target_size_text: str = "5"
+        self._target_size_valid: bool = True
+        self._target_size_feedback: str = (
+            "Límite efectivo: 4.75 MB (95% de seguridad)"
+        )
         self._compression_estimate_cache: dict[
             tuple[str, int, int], dict[str, dict[str, float | int | bool]]
         ] = {}
+        self._target_anatomy_cache: dict[tuple[str, int, int], dict[str, Any]] = {}
         self._is_estimating_compression: bool = False
         self._estimate_generation_id: int = 0
         self._active_estimate_worker: PDFOperationWorker | None = None
@@ -260,6 +275,12 @@ class StudioBridge(QObject):
         self._last_output_file_path: str = ""
         self._last_output_folder: str = ""
         self._last_show_folder_monotonic: float = 0.0
+        self._last_compression_comparison: str = ""
+        self._last_compression_quality_label: str = ""
+        self._last_compression_preview_url: str = ""
+        self._difficult_target_context: dict[str, Any] | None = None
+        self._pending_target_request: dict[str, Any] | None = None
+        self._pending_rescue_preview: bool = False
 
     # --- Propiedades de Navegación Contextual ("Suelta primero, elige después") ---
 
@@ -622,6 +643,10 @@ class StudioBridge(QObject):
             self._progress_percent = 0
             self._last_output_file = ""
             self._last_output_folder = ""
+            self._last_compression_comparison = ""
+            self._last_compression_quality_label = ""
+            self._last_compression_preview_url = ""
+            self._difficult_target_context = None
             self._update_ready_status_message()
         if changed:
             self.activeToolChanged.emit()
@@ -1078,6 +1103,7 @@ class StudioBridge(QObject):
     def removeFileAt(self, index: int) -> None:
         if 0 <= index < len(self._queued_files):
             removed = self._queued_files.pop(index)
+            self._difficult_target_context = None
             self.image_provider.invalidate_file(removed.file_path)
             self._rebuild_pages_from_primary_file()
             self._revalidate_range()
@@ -1134,6 +1160,10 @@ class StudioBridge(QObject):
         self.image_provider.cache.clear()
         self._is_tool_selected = False
         self._has_processing_error = False
+        self._difficult_target_context = None
+        self._last_compression_comparison = ""
+        self._last_compression_quality_label = ""
+        self._last_compression_preview_url = ""
         self._schedule_compression_estimation()
         self._sync_contextual_tool_after_queue_change()
         self._update_ready_status_message()
@@ -1990,9 +2020,176 @@ class StudioBridge(QObject):
             CompressionLevel.EXTREME.value,
             CompressionLevel.RECOMMENDED.value,
             CompressionLevel.LOW_LOSS.value,
-        } and level != self._compression_level:
+        } and (level != self._compression_level or self._is_target_size_mode):
             self._compression_level = level
+            self._is_target_size_mode = False
             self.configChanged.emit()
+
+    @Property(bool, notify=configChanged)
+    def isTargetSizeMode(self) -> bool:
+        return self._is_target_size_mode
+
+    @Slot(bool)
+    def setTargetSizeMode(self, enabled: bool) -> None:
+        val = bool(enabled)
+        if val != self._is_target_size_mode:
+            self._is_target_size_mode = val
+            self.configChanged.emit()
+
+    @Property(float, notify=configChanged)
+    def targetSizeMb(self) -> float:
+        return self._target_size_mb
+
+    @Property(str, notify=configChanged)
+    def targetSizeText(self) -> str:
+        return self._target_size_text
+
+    @Property(bool, notify=configChanged)
+    def isTargetSizeValid(self) -> bool:
+        return self._target_size_valid
+
+    @Property(str, notify=configChanged)
+    def targetSizeFeedback(self) -> str:
+        return self._target_size_feedback
+
+    @Property("QVariantList", constant=True)
+    def targetSizePresets(self) -> list[int]:
+        return [int(p) for p in TARGET_SIZE_PRESETS_MB]
+
+    def _update_target_size_from_text(self, raw_text: str) -> None:
+        normalized = str(raw_text).strip().replace(",", ".")
+        if not normalized:
+            self._target_size_valid = False
+            self._target_size_feedback = (
+                f"Ingresa un límite entre {TARGET_SIZE_MIN_MB:.1f} y {TARGET_SIZE_MAX_MB:.0f} MB."
+            )
+            return
+        try:
+            val = float(normalized)
+        except ValueError:
+            self._target_size_valid = False
+            self._target_size_feedback = "Ingresa un valor numérico válido en MB."
+            return
+        if val < TARGET_SIZE_MIN_MB or val > TARGET_SIZE_MAX_MB:
+            self._target_size_valid = False
+            self._target_size_feedback = (
+                f"El rango seguro es de {TARGET_SIZE_MIN_MB:.1f} a {TARGET_SIZE_MAX_MB:.0f} MB."
+            )
+            return
+        self._target_size_mb = round(val, 2)
+        self._target_size_valid = True
+        eff_mb = (
+            self._target_size_mb * DECIMAL_MB_BYTES * TARGET_SIZE_SAFETY_FACTOR
+        ) / float(DECIMAL_MB_BYTES)
+        self._target_size_feedback = (
+            f"Límite efectivo: {eff_mb:.2f} MB (95% de seguridad)"
+        )
+
+    @Slot(str)
+    def setTargetSizeText(self, text: str) -> None:
+        raw = str(text)
+        self._target_size_text = raw
+        self._update_target_size_from_text(raw)
+        if not self._is_target_size_mode:
+            self._is_target_size_mode = True
+        self.configChanged.emit()
+
+    @Slot(float)
+    def setTargetSizeMb(self, mb: float) -> None:
+        val = float(mb)
+        text = str(int(val)) if abs(val - round(val)) < 1e-6 else f"{val:g}"
+        self._target_size_text = text
+        self._update_target_size_from_text(text)
+        if not self._is_target_size_mode:
+            self._is_target_size_mode = True
+        self.configChanged.emit()
+
+    @Property(str, notify=configChanged)
+    def targetWeightAnatomyNotice(self) -> str:
+        pdf_files = self._queued_valid_pdf_files()
+        if not pdf_files or self._is_estimating_compression:
+            return ""
+        target_bytes = (
+            int(
+                self._target_size_mb
+                * DECIMAL_MB_BYTES
+                * TARGET_SIZE_SAFETY_FACTOR
+            )
+            if self._target_size_valid
+            else 0
+        )
+        if len(pdf_files) == 1:
+            ck = self._file_cache_key(pdf_files[0].file_path)
+            anat = self._target_anatomy_cache.get(ck) if ck is not None else None
+            if anat is None:
+                return ""
+            if target_bytes > 0 and int(anat.get("originalBytes", 0)) <= target_bytes:
+                return "Este archivo ya cumple el límite (no se modificará ni duplicará)."
+            return str(anat.get("advisoryMessage", ""))
+
+        for qf in pdf_files:
+            ck = self._file_cache_key(qf.file_path)
+            anat = self._target_anatomy_cache.get(ck) if ck is not None else None
+            if anat and anat.get("isTextHeavy"):
+                return (
+                    "Uno o más PDFs son principalmente texto/vectores: "
+                    "el ahorro de peso será limitado."
+                )
+        return ""
+
+    @Property(str, notify=progressChanged)
+    def lastCompressionComparison(self) -> str:
+        return self._last_compression_comparison
+
+    @Property(str, notify=progressChanged)
+    def lastCompressionQualityLabel(self) -> str:
+        return self._last_compression_quality_label
+
+    @Property(str, notify=progressChanged)
+    def lastCompressionPreviewUrl(self) -> str:
+        return self._last_compression_preview_url
+
+    @Property(bool, notify=progressChanged)
+    def hasDifficultTargetResult(self) -> bool:
+        return self._difficult_target_context is not None
+
+    @Property(str, notify=progressChanged)
+    def difficultTargetSummary(self) -> str:
+        if self._difficult_target_context is None:
+            return ""
+        res = self._difficult_target_context["result"]
+        return str(res.message)
+
+    @Property(str, notify=progressChanged)
+    def difficultTargetAdvisory(self) -> str:
+        if self._difficult_target_context is None:
+            return ""
+        res = self._difficult_target_context["result"]
+        return str(res.anatomy.advisory_message)
+
+    @Slot()
+    def dismissDifficultTargetResult(self) -> None:
+        """Descarta la tarjeta de caso difícil y libera los bytes en RAM del mejor intento."""
+        if self._difficult_target_context is not None:
+            res = self._difficult_target_context.get("result")
+            if res is not None:
+                res.best_pdf_bytes = None
+            self._difficult_target_context = None
+            self.progressChanged.emit()
+
+    @Slot()
+    def openResultInViewer(self) -> None:
+        """Abre el PDF comprimido generado dentro de Visor y Firma para comprobar su lectura."""
+        raw = (self._last_output_file_path or self._last_output_file or "").strip()
+        if not raw:
+            return
+        out_path = Path(raw)
+        if not out_path.exists() or out_path.suffix.lower() != ".pdf":
+            self._emit_error("No se encontró el PDF generado para previsualizar.")
+            return
+        self.clearFiles()
+        self.addSingleFilePath(str(out_path))
+        self.selectTool(ToolType.SIGN.value)
 
     def _file_cache_key(self, file_path: Path) -> tuple[str, int, int] | None:
         try:
@@ -2014,10 +2211,14 @@ class StudioBridge(QObject):
         items: list[tuple[tuple[str, int, int], Path, str | None]],
         on_progress: Any = None,
         is_cancelled: Any = None,
-    ) -> dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]]:
-        """Calcula la estimación real basada en muestra en un hilo QRunnable sin bloquear la UI."""
+    ) -> tuple[
+        dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]],
+        dict[tuple[str, int, int], dict[str, Any]],
+    ]:
+        """Calcula la estimación real basada en muestra y la anatomía de peso en un hilo QRunnable."""
         pdf_engine = _pdf_engine_module().PDFEngine
         results: dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]] = {}
+        anatomies: dict[tuple[str, int, int], dict[str, Any]] = {}
         for cache_key, path, pwd in items:
             if is_cancelled is not None and is_cancelled():
                 raise TaskCancelledError("Cálculo de estimación cancelado.")
@@ -2039,7 +2240,30 @@ class StudioBridge(QObject):
                     }
                     for lvl in CompressionLevel
                 }
-        return results
+            try:
+                anat = pdf_engine.analyze_pdf_weight_anatomy(
+                    path, password=pwd, is_cancelled=is_cancelled
+                )
+                anatomies[cache_key] = {
+                    "originalBytes": anat.original_bytes,
+                    "imageBytes": anat.image_bytes,
+                    "imageRatio": anat.image_ratio,
+                    "isTextHeavy": anat.is_text_heavy,
+                    "isSingleLargeImage": anat.is_single_large_image,
+                    "advisoryMessage": anat.advisory_message,
+                }
+            except TaskCancelledError:
+                raise
+            except Exception:
+                anatomies[cache_key] = {
+                    "originalBytes": cache_key[2],
+                    "imageBytes": 0,
+                    "imageRatio": 0.0,
+                    "isTextHeavy": False,
+                    "isSingleLargeImage": False,
+                    "advisoryMessage": "",
+                }
+        return results, anatomies
 
     def _schedule_compression_estimation(self) -> None:
         """Lanza o reutiliza en caché la estimación asíncrona de compresión y cancela cálculos obsoletos."""
@@ -2067,7 +2291,10 @@ class StudioBridge(QObject):
             ck = self._file_cache_key(qf.file_path)
             if ck is None:
                 continue
-            if ck not in self._compression_estimate_cache:
+            if (
+                ck not in self._compression_estimate_cache
+                or ck not in self._target_anatomy_cache
+            ):
                 pwd = self._passwords.get(qf.file_path.resolve())
                 missing_items.append((ck, qf.file_path, pwd))
 
@@ -2083,10 +2310,16 @@ class StudioBridge(QObject):
         self._active_estimate_worker = worker
 
         def _on_est_finished(
-            res: dict[tuple[str, int, int], dict[str, dict[str, float | int | bool]]],
+            res: Any,
             expected_gen: int = gen_id,
         ) -> None:
-            if isinstance(res, dict):
+            if isinstance(res, tuple) and len(res) == 2:
+                est_map, anat_map = res
+                if isinstance(est_map, dict):
+                    self._compression_estimate_cache.update(est_map)
+                if isinstance(anat_map, dict):
+                    self._target_anatomy_cache.update(anat_map)
+            elif isinstance(res, dict):
                 self._compression_estimate_cache.update(res)
             if expected_gen == self._estimate_generation_id:
                 self._is_estimating_compression = False
@@ -2195,6 +2428,13 @@ class StudioBridge(QObject):
         pdf_files = self._queued_valid_pdf_files()
         if not pdf_files:
             return "Agrega un pliego PDF para calcular la reducción real."
+        if self._is_target_size_mode:
+            if not self._target_size_valid:
+                return self._target_size_feedback
+            anat_notice = self.targetWeightAnatomyNotice
+            if anat_notice:
+                return f"{self._target_size_feedback} · {anat_notice}"
+            return self._target_size_feedback
         agg = self._aggregate_compression_estimates()
         if agg is None or self._is_estimating_compression:
             return "Calculando..."
@@ -2570,6 +2810,8 @@ class StudioBridge(QObject):
             return
 
         tool = ToolType(self._active_tool)
+        self._pending_target_request = None
+        self._pending_rescue_preview = False
         try:
             worker = self._build_worker_for_tool(
                 tool, primary_file, primary_pwd, out_dir
@@ -2580,10 +2822,18 @@ class StudioBridge(QObject):
             self._emit_error(str(exc))
             return
 
+        self._start_worker(worker)
+
+    def _start_worker(
+        self,
+        worker: PDFOperationWorker,
+        initial_status: str = "Iniciando tarea en segundo plano...",
+    ) -> None:
+        """Conecta señales y lanza un PDFOperationWorker en el pool con estado ocupado."""
         self._has_processing_error = False
         self._is_busy = True
         self._progress_percent = 5
-        self._status_message = "Iniciando tarea en segundo plano..."
+        self._status_message = initial_status
         self.progressChanged.emit()
         self.activeToolChanged.emit()
 
@@ -2792,6 +3042,101 @@ class StudioBridge(QObject):
             message=batch_msg,
         )
 
+    @staticmethod
+    def _batch_target_compress_task(
+        pdf_files: list[Path],
+        out_dir: Path,
+        passwords: dict[Path, str],
+        target_mb: float,
+        custom_base_name: str = "",
+        on_progress: Any = None,
+        is_cancelled: Any = None,
+    ) -> OperationResult:
+        """Comprime un lote de PDFs apuntando al límite en MB de forma independiente por archivo."""
+        pe_mod = _pdf_engine_module()
+        pdf_engine = pe_mod.PDFEngine
+        clean_custom = clean_windows_filename_stem(custom_base_name, extension=".pdf")
+        protected_set = {Path(p).resolve() for p in pdf_files}
+        all_outputs: list[Path] = []
+        per_file_summaries: list[str] = []
+        total_orig = 0
+        total_final = 0
+        total = len(pdf_files)
+
+        for idx, pdf_path in enumerate(pdf_files):
+            if is_cancelled is not None and is_cancelled():
+                raise TaskCancelledError("Operación cancelada por el usuario.")
+            pwd = passwords.get(pdf_path) or passwords.get(pdf_path.resolve())
+
+            def _sub_progress(p: int, msg: str, i: int = idx) -> None:
+                if on_progress is not None:
+                    overall = int(((i + (p / 100.0)) / total) * 100)
+                    on_progress(overall, f"[{i + 1}/{total}] {msg}")
+
+            fallback_stem = f"{pdf_path.stem}_comprimido"
+            desired_stem = f"{clean_custom}_{idx + 1}" if clean_custom else fallback_stem
+            dest = resolve_unique_output_path(
+                out_dir,
+                desired_stem,
+                fallback_stem,
+                extension=".pdf",
+                protected_inputs=protected_set,
+            )
+            t_res = pdf_engine.compress_pdf_to_target_size(
+                pdf_path,
+                dest,
+                target_mb,
+                password=pwd,
+                on_progress=_sub_progress,
+                is_cancelled=is_cancelled,
+            )
+            if t_res.already_within_limit:
+                total_orig += t_res.original_size_bytes
+                total_final += t_res.original_size_bytes
+                per_file_summaries.append(f"{pdf_path.name}: ya cumple límite")
+                continue
+            if t_res.met_target and t_res.operation_result is not None:
+                all_outputs.extend(t_res.operation_result.output_files)
+                total_orig += t_res.original_size_bytes
+                total_final += t_res.operation_result.final_size_bytes
+                per_file_summaries.append(
+                    f"{pdf_path.name}: {t_res.comparison_text} ({t_res.quality_label})"
+                )
+            elif t_res.best_pdf_bytes is not None:
+                saved_res = pdf_engine.save_pdf_bytes_safely(
+                    t_res.best_pdf_bytes,
+                    pdf_path,
+                    dest,
+                    original_size_bytes=t_res.original_size_bytes,
+                    quality_label=t_res.quality_label,
+                    is_cancelled=is_cancelled,
+                )
+                t_res.best_pdf_bytes = None
+                all_outputs.extend(saved_res.output_files)
+                total_orig += t_res.original_size_bytes
+                total_final += saved_res.final_size_bytes
+                per_file_summaries.append(
+                    f"{pdf_path.name}: mejor intento ({pe_mod.format_decimal_mb(saved_res.final_size_bytes)})"
+                )
+
+        saved_pct = (
+            max(0.0, ((total_orig - total_final) / total_orig) * 100.0)
+            if total_orig > 0
+            else 0.0
+        )
+        batch_msg = (
+            f"{pe_mod.format_decimal_mb(total_orig)} → {pe_mod.format_decimal_mb(total_final)} "
+            f"— " + " · ".join(per_file_summaries)
+        )
+        return OperationResult(
+            tool=ToolType.COMPRESS,
+            output_files=all_outputs,
+            original_size_bytes=total_orig,
+            final_size_bytes=total_final,
+            saved_percentage=round(saved_pct, 2),
+            message=batch_msg,
+        )
+
     def _build_worker_for_tool(
         self,
         tool: ToolType,
@@ -2911,13 +3256,24 @@ class StudioBridge(QObject):
             )
 
         if tool in {ToolType.COMPRESS, ToolType.PDF_TO_IMAGES, ToolType.WATERMARK} and len(pdf_paths) > 1:
+            custom_base = self._custom_output_name if self._output_name_user_edited else ""
+            if tool == ToolType.COMPRESS and self._is_target_size_mode:
+                if not self._target_size_valid:
+                    raise PDFStudioError(self._target_size_feedback)
+                return PDFOperationWorker(
+                    self._batch_target_compress_task,
+                    pdf_paths,
+                    out_dir,
+                    dict(self._passwords),
+                    self._target_size_mb,
+                    custom_base_name=custom_base,
+                )
             wm_cfg = WatermarkConfig(
                 text=self._watermark_text,
                 opacity=self._watermark_opacity,
                 angle=self._watermark_angle,
                 position=WatermarkPosition(self._watermark_position),
             )
-            custom_base = self._custom_output_name if self._output_name_user_edited else ""
             return PDFOperationWorker(
                 self._batch_pdf_task,
                 pdf_paths,
@@ -2939,6 +3295,22 @@ class StudioBridge(QObject):
                 extension=".pdf",
                 protected_inputs=protected_inputs,
             )
+            if self._is_target_size_mode:
+                if not self._target_size_valid:
+                    raise PDFStudioError(self._target_size_feedback)
+                self._pending_target_request = {
+                    "input_file": target_pdf,
+                    "output_path": dest,
+                    "password": primary_pwd,
+                    "target_mb": self._target_size_mb,
+                }
+                return PDFOperationWorker(
+                    pdf_engine.compress_pdf_to_target_size,
+                    target_pdf,
+                    dest,
+                    self._target_size_mb,
+                    password=primary_pwd,
+                )
             return PDFOperationWorker(
                 pdf_engine.compress_pdf,
                 target_pdf,
@@ -3065,12 +3437,87 @@ class StudioBridge(QObject):
         self._status_message = message
         self.progressChanged.emit()
 
-    def _on_worker_finished(self, result: OperationResult) -> None:
+    def _on_worker_finished(self, result: Any) -> None:
         self._is_busy = False
         self._has_processing_error = False
         self._progress_percent = 100
-        self._status_message = result.message
 
+        if isinstance(result, TargetCompressionResult):
+            req = self._pending_target_request
+            self._pending_target_request = None
+            self._pending_rescue_preview = False
+
+            if result.already_within_limit:
+                self._status_message = result.message
+                self._difficult_target_context = None
+                self._last_compression_comparison = result.comparison_text
+                self._last_compression_quality_label = result.quality_label
+                self._last_compression_preview_url = ""
+                self.progressChanged.emit()
+                self.activeToolChanged.emit()
+                self._emit_notice(result.message, is_error=False)
+                return
+
+            if not result.met_target:
+                self._status_message = result.message
+                self._difficult_target_context = {
+                    "result": result,
+                    "input_file": req["input_file"] if req else Path(),
+                    "output_path": req["output_path"] if req else Path(),
+                    "password": req["password"] if req else None,
+                    "target_mb": result.target_mb,
+                }
+                self.progressChanged.emit()
+                self.activeToolChanged.emit()
+                self.difficultCompressionOccurred.emit(
+                    result.message, result.anatomy.advisory_message
+                )
+                return
+
+            if result.operation_result is not None:
+                self._difficult_target_context = None
+                self._last_compression_comparison = result.comparison_text
+                self._last_compression_quality_label = result.quality_label
+                op_res = result.operation_result
+                self._status_message = op_res.message
+                resolved_first = (
+                    str(Path(op_res.output_files[0]).resolve())
+                    if op_res.output_files
+                    else ""
+                )
+                folder_out = (
+                    str(Path(op_res.output_files[0]).resolve().parent)
+                    if op_res.output_files
+                    else ""
+                )
+                self._last_output_file = resolved_first
+                self._last_output_file_path = resolved_first
+                self._last_output_folder = folder_out
+                if resolved_first:
+                    self.image_provider.invalidate_file(Path(resolved_first))
+                    self._last_compression_preview_url = (
+                        f"image://pdfpage/0?path={quote(resolved_first)}&dpi=120"
+                    )
+                else:
+                    self._last_compression_preview_url = ""
+                self.history_store.record_operation(op_res)
+                self.progressChanged.emit()
+                self.activeToolChanged.emit()
+                self.historyChanged.emit()
+                self.operationCompleted.emit(
+                    op_res.message, resolved_first, folder_out
+                )
+                return
+
+        is_rescue_preview = self._pending_rescue_preview
+        self._pending_rescue_preview = False
+        self._pending_target_request = None
+        if not isinstance(result, OperationResult):
+            self.progressChanged.emit()
+            self.activeToolChanged.emit()
+            return
+
+        self._status_message = result.message
         resolved_first = (
             str(Path(result.output_files[0]).resolve()) if result.output_files else ""
         )
@@ -3083,6 +3530,20 @@ class StudioBridge(QObject):
         self._last_output_file_path = resolved_first
         self._last_output_folder = folder_out
 
+        if is_rescue_preview:
+            self._difficult_target_context = None
+            if resolved_first:
+                self.image_provider.invalidate_file(Path(resolved_first))
+                self._last_compression_preview_url = (
+                    f"image://pdfpage/0?path={quote(resolved_first)}&dpi=120"
+                )
+            else:
+                self._last_compression_preview_url = ""
+        else:
+            self._last_compression_comparison = ""
+            self._last_compression_quality_label = ""
+            self._last_compression_preview_url = ""
+
         self.history_store.record_operation(result)
         self.progressChanged.emit()
         self.activeToolChanged.emit()
@@ -3093,6 +3554,8 @@ class StudioBridge(QObject):
         self._is_busy = False
         self._has_processing_error = False
         self._progress_percent = 0
+        self._pending_target_request = None
+        self._pending_rescue_preview = False
         self._status_message = message
         self.progressChanged.emit()
         self.activeToolChanged.emit()
@@ -3101,9 +3564,100 @@ class StudioBridge(QObject):
         self._is_busy = False
         self._has_processing_error = True
         self._progress_percent = 0
+        self._pending_target_request = None
+        self._pending_rescue_preview = False
         self._status_message = f"No se pudo completar: {error_msg}"
         self.activeToolChanged.emit()
         self._emit_error(error_msg)
+
+    @Slot()
+    def rescueSaveBestAttempt(self) -> None:
+        """Acción de rescate 1: guarda en disco el mejor intento generado en RAM."""
+        if self._is_busy or self._difficult_target_context is None:
+            return
+        ctx = self._difficult_target_context
+        res = ctx["result"]
+        if not res.best_pdf_bytes:
+            self._emit_error("No hay resultado previo en memoria para guardar.")
+            return
+        pdf_engine = _pdf_engine_module().PDFEngine
+        self._last_compression_comparison = res.comparison_text
+        self._last_compression_quality_label = res.quality_label
+        self._pending_rescue_preview = True
+        worker = PDFOperationWorker(
+            pdf_engine.save_pdf_bytes_safely,
+            res.best_pdf_bytes,
+            ctx["input_file"],
+            ctx["output_path"],
+            original_size_bytes=res.original_size_bytes,
+            quality_label=res.quality_label,
+        )
+        self._start_worker(worker, "Guardando el mejor intento alcanzado...")
+
+    @Slot()
+    def rescueConvertGrayscale(self) -> None:
+        """Acción de rescate 2: convierte imágenes a blanco y negro (escala de grises) y re-evalúa."""
+        if self._is_busy or self._difficult_target_context is None:
+            return
+        ctx = self._difficult_target_context
+        pdf_engine = _pdf_engine_module().PDFEngine
+        self._pending_target_request = {
+            "input_file": ctx["input_file"],
+            "output_path": ctx["output_path"],
+            "password": ctx["password"],
+            "target_mb": ctx["target_mb"],
+        }
+        worker = PDFOperationWorker(
+            pdf_engine.compress_pdf_grayscale_rescue,
+            ctx["input_file"],
+            ctx["output_path"],
+            ctx["target_mb"],
+            password=ctx["password"],
+        )
+        self._start_worker(worker, "Convirtiendo imágenes a escala de grises...")
+
+    @Slot()
+    def rescueRemoveBlankPages(self) -> None:
+        """Acción de rescate 3: detecta y descarta páginas en blanco a 36 DPI y re-evalúa."""
+        if self._is_busy or self._difficult_target_context is None:
+            return
+        ctx = self._difficult_target_context
+        pdf_engine = _pdf_engine_module().PDFEngine
+        self._pending_target_request = {
+            "input_file": ctx["input_file"],
+            "output_path": ctx["output_path"],
+            "password": ctx["password"],
+            "target_mb": ctx["target_mb"],
+        }
+        worker = PDFOperationWorker(
+            pdf_engine.remove_blank_pages_and_compress,
+            ctx["input_file"],
+            ctx["output_path"],
+            ctx["target_mb"],
+            password=ctx["password"],
+        )
+        self._start_worker(worker, "Analizando páginas en blanco a 36 DPI...")
+
+    @Slot()
+    def rescueSplitIntoParts(self) -> None:
+        """Acción de rescate 4: divide el PDF en partes consecutivas bajo el límite objetivo."""
+        if self._is_busy or self._difficult_target_context is None:
+            return
+        ctx = self._difficult_target_context
+        res = ctx["result"]
+        pdf_engine = _pdf_engine_module().PDFEngine
+        self._last_compression_comparison = ""
+        self._last_compression_quality_label = ""
+        self._pending_rescue_preview = True
+        worker = PDFOperationWorker(
+            pdf_engine.split_pdf_to_target_size,
+            ctx["input_file"],
+            ctx["output_path"],
+            ctx["target_mb"],
+            password=ctx["password"],
+            source_pdf_bytes=res.best_pdf_bytes,
+        )
+        self._start_worker(worker, "Dividiendo documento en partes bajo el límite...")
 
     @staticmethod
     def _normalize_target_path(raw_path: str) -> Path | None:
